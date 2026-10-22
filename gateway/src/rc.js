@@ -77,6 +77,8 @@ export const rc = {
   providers: () => call('config/providers'),
   // 列一层目录（真实读取，可用于连通性测试）
   list: (fs, remote = '') => call('operations/list', { fs, remote }, 45000),
+  // 创建目录（连同上级目录一并创建），备份执行时用来自动补建不存在的目标目录
+  mkdir: (fs, remote = '') => call('operations/mkdir', { fs, remote }, 45000),
   about: (fs) => call('operations/about', { fs }, 30000),
   check: (srcFs, dstFs) => call('operations/check', { srcFs, dstFs }, 15 * 60 * 1000),
   syncAsync: async (srcFs, dstFs) => (await call('sync/sync', { srcFs, dstFs, _async: true })).jobid,

@@ -207,6 +207,48 @@ async function main() {
     ok(ov.status === 200 && ov.data.remotes.length >= 3 && ov.data.tasks.length >= 3, '概览返回网盘/任务/记录聚合',
       `网盘 ${ov.data.remotes.length} 个，任务 ${ov.data.tasks.length} 个`);
 
+    console.log('== 8. 回归：目标目录不存在 → 执行备份时自动创建，首次备份成功 ==');
+    const newDstPath = path.join(T, 'dstbase', 'auto-created', 'deep');
+    ok(!fs.existsSync(newDstPath), '前置确认：目标目录尚不存在');
+    const tAuto = await api('POST', '/api/tasks', {
+      name: '目标自动创建', srcRemote: 'tsrc', srcPath: srcDir,
+      dstRemote: 'tdst', dstPath: newDstPath, schedule: { type: 'daily', time: '04:00' }
+    });
+    ok(tAuto.status === 200, '目标目录不存在的任务可以创建');
+    await api('POST', `/api/tasks/${tAuto.data.task.id}/run`);
+    const runAuto = await waitFor(async () => {
+      const d = await api('GET', '/api/runs?limit=50');
+      const r = d.data.runs.find((x) => x.taskId === tAuto.data.task.id);
+      return r && r.status !== 'running' ? r : null;
+    }, 60000);
+    ok(runAuto.status === 'success', '目标目录不存在时首次备份成功（不再卡在阶段3）',
+      `状态=${runAuto.status} ${runAuto.reasonZh || ''}`);
+    ok(fs.existsSync(path.join(newDstPath, 'a.txt')) &&
+      fs.readFileSync(path.join(newDstPath, 'a.txt'), 'utf8') === fs.readFileSync(path.join(srcDir, 'a.txt'), 'utf8'),
+      '目标目录被自动创建且文件同步到位');
+
+    console.log('== 9. 回归：新建任务不补跑（从创建后的下一个计划时刻起执行）==');
+    // 取网关时区（Asia/Shanghai）下约 70 分钟前的时间作为「已过」的计划时刻
+    const shNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+    const shPast = new Date(shNow.getTime() - 70 * 60 * 1000);
+    const p2 = (n) => String(n).padStart(2, '0');
+    const pastTime = `${p2(shPast.getHours())}:${p2(shPast.getMinutes())}`;
+    const nowTime = `${p2(shNow.getHours())}:${p2(shNow.getMinutes())}`;
+    const tLate = await api('POST', '/api/tasks', {
+      name: '新建不补跑', srcRemote: 'tsrc', srcPath: srcDir,
+      dstRemote: 'tdst', dstPath: dstDir, schedule: { type: 'daily', time: pastTime }
+    });
+    ok(tLate.status === 200, '计划时刻已过的任务创建成功', `计划时刻=${pastTime}，当前=${nowTime}`);
+    await sleep(3000); // TICK_MS=800，至少等 3 个调度 tick
+    const runsLate = await api('GET', `/api/runs?taskId=${tLate.data.task.id}`);
+    ok((runsLate.data.runs || []).length === 0, '新建任务未被立即补跑（无运行记录）');
+    if (pastTime < nowTime) {
+      // 同一天内：调度器应已把这个「出生前」的 slot 登记为已处理，明天到点才会真正执行
+      const tasksNow = await api('GET', '/api/tasks');
+      const lt = tasksNow.data.tasks.find((x) => x.id === tLate.data.task.id);
+      ok(!!lt?.lastSlotKey, '调度器已登记该 slot（下一个计划时刻会正常触发）', `lastSlotKey=${lt?.lastSlotKey}`);
+    }
+
     console.log(failures === 0 ? '\n全部自测通过 ✅' : `\n有 ${failures} 项未通过 ❌`);
   } finally {
     gw.kill('SIGTERM');

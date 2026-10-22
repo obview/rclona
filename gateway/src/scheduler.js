@@ -12,6 +12,7 @@ function dateKey(d) {
   const p = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
+// 返回「当前已到点、最近一个计划时刻」的 { key, at }；还没到点返回 null
 function slotDue(task, now) {
   const { time, type, weekday } = task.schedule || {};
   const { h, m } = parseHM(time);
@@ -22,7 +23,7 @@ function slotDue(task, now) {
     slot.setDate(slot.getDate() - diff);
   }
   if (now < slot) return null;
-  return `${dateKey(slot)} ${time}`;
+  return { key: `${dateKey(slot)} ${time}`, at: slot };
 }
 
 async function tick() {
@@ -30,10 +31,14 @@ async function tick() {
   // 备份任务
   for (const task of store.data.tasks) {
     if (!task.enabled || isRunning(task.id)) continue;
-    const key = slotDue(task, now);
-    if (key && task.lastSlotKey !== key) {
-      task.lastSlotKey = key;
+    const due = slotDue(task, now);
+    if (due && task.lastSlotKey !== due.key) {
+      task.lastSlotKey = due.key;
       store.save();
+      // 补跑只针对「服务停机期间错过」的已存在任务：slot 早于任务创建时间的不跑，
+      // 新建任务从创建后的下一个计划时刻起执行（slot 已登记，明天/下周到点会正常触发）
+      const createdAt = task.createdAt ? new Date(task.createdAt).getTime() : 0;
+      if (due.at.getTime() < createdAt) continue;
       console.log(`[scheduler] 定时触发备份任务「${task.name}」`);
       runTask(task, 'schedule').catch((e) => console.error('[scheduler] 任务异常：', e.message));
     }

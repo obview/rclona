@@ -10,6 +10,7 @@ import {
   loginLocked, noteLoginFail, noteLoginOk
 } from './auth.js';
 import { rc, normalizeProviders, fsSpec } from './rc.js';
+import { classifyError } from './classify.js';
 import { healthOf, testRemote } from './health.js';
 import { runTask, isRunning } from './runner.js';
 import { sendTestMail } from './mailer.js';
@@ -171,7 +172,17 @@ export function createServer() {
           const remote = url.searchParams.get('remote') || '';
           const sub = url.searchParams.get('path') || '';
           // 把目录路径拼进 fs 规格里列一层（本地目录可用绝对路径从 / 浏览）
-          const { list } = await rc.list(fsSpec(remote, sub), '');
+          let list;
+          try {
+            ({ list } = await rc.list(fsSpec(remote, sub), ''));
+          } catch (e) {
+            // 浏览到不存在 / 打不开的路径：给一句白话提示即可，不要把 rclone 的英文报错甩给用户。
+            // 注意：浏览时不自动建目录——建目录只发生在真正执行备份时（目标目录不存在会自动创建）
+            const hint = classifyError(e.message).kind === 'notfound'
+              ? '这个文件夹不存在（可能被改名、移动或删除了）。如果它是备份要存到的目标位置，不用管：执行备份时会自动创建。'
+              : `这个文件夹暂时打不开：${classifyError(e.message).reasonZh}`;
+            return sendJson(res, 400, { error: hint });
+          }
           const dirs = (list || []).filter((x) => x.IsDir)
             .map((x) => ({ name: x.Name, path: (sub && sub !== '/' ? sub.replace(/\/+$/, '') + '/' : sub === '/' ? '/' : '') + x.Name }));
           return sendJson(res, 200, { dirs });

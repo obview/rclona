@@ -112,13 +112,21 @@ export async function runTask(task, trigger = 'manual') {
     setStage(2, 'running');
     try {
       await rc.list(dstFs, '');
+    } catch (e) {
+      if (classifyError(e.message).kind !== 'notfound') return fail(2, e.message);
+      // 目标目录还不存在：这不是故障——rclone sync 本来就会自动建目录，
+      // 这里先替用户建好，让首次备份（目标从没建过）也能直接成功；建不出来才算失败
       try {
-        const ab = await rc.about(dstFs);
-        if (ab && typeof ab.free === 'number' && ab.free >= 0 && ab.free < scan.bytes) {
-          return fail(2, 'insufficient space: 目标可用空间小于源文件总大小');
-        }
-      } catch { /* about 不支持就跳过容量预检 */ }
-    } catch (e) { return fail(2, e.message); }
+        await rc.mkdir(dstFs, '');
+        log('目标目录不存在，已自动创建');
+      } catch (mkErr) { return fail(2, mkErr.message); }
+    }
+    try {
+      const ab = await rc.about(dstFs);
+      if (ab && typeof ab.free === 'number' && ab.free >= 0 && ab.free < scan.bytes) {
+        return fail(2, 'insufficient space: 目标可用空间小于源文件总大小');
+      }
+    } catch { /* about 不支持就跳过容量预检 */ }
     setStage(2, 'ok', Date.now() - t0);
     log('目标网盘连接正常');
 
