@@ -1,0 +1,18 @@
+services:
+  rclona:
+    build: .
+    image: rclona:latest
+    container_name: rclona
+    restart: unless-stopped
+    ports:
+      - "${PANEL_PORT:-8080}:8080"
+    environment:
+      PANEL_USER: "${PANEL_USER:-admin}"
+      PANEL_PASSWORD: "${PANEL_PASSWORD:-}"
+      TZ: "${TZ:-Asia/Shanghai}"
+    volumes:
+      # 全部数据（网盘配置、任务、记录、设置）都在这一个卷里
+      - rclona-data:/data
+
+volumes:
+  rclona-data:

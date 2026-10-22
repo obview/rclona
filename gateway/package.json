@@ -1,0 +1,1 @@
+{"dependencies":{"nodemailer":"^6.9.16"},"name":"rclona-gateway","private":true,"scripts":{"start":"node src/index.js","test:e2e":"node test/e2e.mjs"},"type":"module","version":"0.1.0"}
