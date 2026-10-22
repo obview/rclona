@@ -254,10 +254,98 @@ input, select, textarea { font-family: inherit; font-size: 14px; color: var(--te
 .login-card .l-brand .bsub { color: var(--text-3); font-size: 13px; margin-top: 3px; }
 .login-err { background: var(--red-bg); color: var(--red-dark); border-radius: 9px; padding: 9px 13px; font-size: 13px; margin-bottom: 14px; }
 
+/* ===== 圆圈问号详解（#1：CSS 画的圆圈 + ?，悬停/聚焦出气泡） ===== */
+.help-tip { position: relative; display: inline-flex; vertical-align: middle; outline: none; }
+.help-q {
+  width: 16px; height: 16px; border: 1.5px solid var(--text-3); border-radius: 50%;
+  color: var(--text-3); font-size: 11px; font-weight: 700; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center; cursor: help;
+  transition: all .15s; background: #fff;
+}
+.help-tip:hover .help-q, .help-tip:focus .help-q { border-color: var(--indigo-600); color: var(--indigo-600); }
+.help-bubble {
+  position: absolute; left: 50%; bottom: calc(100% + 9px); transform: translateX(-50%) translateY(3px);
+  width: max-content; max-width: 300px; background: #262a45; color: #eceef8; border-radius: 10px;
+  padding: 10px 13px; font-size: 12.5px; font-weight: 400; line-height: 1.65; white-space: pre-line;
+  box-shadow: 0 10px 30px rgba(20,22,50,.35); opacity: 0; pointer-events: none; transition: all .16s; z-index: 80;
+  text-align: left; letter-spacing: 0;
+}
+.help-bubble::after {
+  content: ""; position: absolute; left: 50%; top: 100%; transform: translateX(-50%);
+  border: 6px solid transparent; border-top-color: #262a45;
+}
+.help-tip:hover .help-bubble, .help-tip:focus .help-bubble { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ===== 首页仪表盘（#6：学 FlClash 的白卡大圆角 + 状态药丸 + 大数字） ===== */
+.dot-paused { background: #b7bcd2; box-shadow: 0 0 0 3px var(--grey-bg); }
+.word-off { color: var(--text-3); }
+.big-status.skip { background: var(--grey-bg); color: var(--text-3); }
+.problem-card { border-color: #f3c2c2; background: #fff8f8; padding: 16px 20px 8px; margin-bottom: 18px; }
+.problem-head { display: flex; align-items: center; gap: 10px; font-weight: 700; color: var(--red-dark); margin-bottom: 6px; }
+.problem-head .a-icon { width: 34px; height: 34px; border-radius: 50%; background: var(--red-bg); color: var(--red); display: inline-flex; align-items: center; justify-content: center; }
+.problem-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px dashed #f0d3d3; }
+.problem-row .p-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.problem-row .p-dot.fail { background: var(--red); }
+.problem-row .p-text { flex: 1; font-size: 13.5px; color: #7c4a4a; min-width: 0; }
+.problem-row .p-actions { display: flex; gap: 8px; flex: 0 0 auto; }
+.dash-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.dash-card { border-radius: 18px; overflow: hidden; }
+.dash-card.span2 { grid-column: 1 / -1; }
+.dash-card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.dash-card-head.pad { padding: 16px 20px 2px; margin-bottom: 4px; }
+.kv-list { display: flex; flex-direction: column; }
+.kv-row { display: flex; align-items: baseline; gap: 14px; padding: 7px 0; font-size: 13.5px; }
+.kv-row .k { color: var(--text-3); flex: 0 0 104px; font-size: 13px; }
+.kv-row .v { flex: 1; min-width: 0; }
+.all-ok-line { font-size: 15px; font-weight: 600; color: var(--green); padding: 12px 0 6px; }
+.dash-foot-note { color: var(--text-3); font-size: 12px; margin-top: 10px; }
+.dash-empty { color: var(--text-3); padding: 18px 20px 24px; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.mini-task-row { display: flex; align-items: center; gap: 12px; padding: 11px 20px; border-bottom: 1px solid #f0f2fa; }
+.mini-task-row:last-child { border-bottom: none; }
+.mini-task-row .mt-name { font-weight: 600; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mini-task-row .mt-sub { color: var(--text-3); font-size: 12.5px; }
+.stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 10px; padding-top: 4px; }
+.stat-num { font-size: 27px; font-weight: 800; color: var(--indigo-900); line-height: 1.15; }
+.stat-label { color: var(--text-3); font-size: 12.5px; margin-top: 2px; }
+.sys-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 30px; }
+
+/* ===== 任务完成通知条（#10：右下角圆角长条） ===== */
+.run-toasts { position: fixed; right: 22px; bottom: 22px; z-index: 90; display: flex; flex-direction: column; gap: 10px; align-items: flex-end; }
+.run-toast {
+  display: flex; align-items: center; gap: 10px; max-width: 380px; cursor: pointer;
+  background: #fff; border: 1px solid var(--border); border-left: 4px solid var(--green);
+  border-radius: 14px; padding: 12px 14px; box-shadow: 0 12px 34px rgba(20,22,50,.22);
+  animation: rt-in .25s ease-out; font-size: 13.5px;
+}
+.run-toast.failed { border-left-color: var(--red); }
+.run-toast .rt-ico { width: 26px; height: 26px; border-radius: 50%; background: var(--green-bg); color: var(--green); display: inline-flex; align-items: center; justify-content: center; flex: 0 0 auto; }
+.run-toast.failed .rt-ico { background: var(--red-bg); color: var(--red); }
+.run-toast .rt-text { flex: 1; min-width: 0; }
+.run-toast .rt-x { background: none; border: none; color: var(--text-3); font-size: 17px; line-height: 1; padding: 2px 4px; flex: 0 0 auto; }
+.run-toast .rt-x:hover { color: var(--text); }
+@keyframes rt-in { from { opacity: 0; transform: translateX(24px); } to { opacity: 1; transform: none; } }
+
+/* ===== 星期多选 chips（#5 每周） ===== */
+.wd-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.wd-chip {
+  width: 34px; height: 34px; border-radius: 50%; border: 1.5px solid var(--border);
+  background: #fff; color: var(--text-2); font-size: 13px; transition: all .13s;
+}
+.wd-chip:hover { border-color: var(--indigo-500); }
+.wd-chip.on { background: var(--indigo-600); border-color: var(--indigo-600); color: #fff; font-weight: 700; }
+
+/* 通知条点进来的记录行高亮闪一下 */
+.run-row.flash { animation: flash-bg 2.4s ease-out; }
+@keyframes flash-bg { 0%, 55% { background: var(--indigo-50); } 100% { background: transparent; } }
+
 @media (max-width: 860px) {
   .sidebar { display: none; }
   .pair-flow { flex-direction: column; align-items: center; }
   .pair-mid { transform: rotate(90deg); min-height: 70px; }
   .form-grid { grid-template-columns: 1fr; }
   .page { padding: 20px 16px 40px; }
+  .dash-grid { grid-template-columns: 1fr; }
+  .sys-grid { grid-template-columns: 1fr; }
+  .run-toasts { left: 16px; right: 16px; align-items: stretch; }
+  .run-toast { max-width: none; }
 }

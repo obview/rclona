@@ -15,5 +15,7 @@ export const cfg = {
   healthRetryMs: Number(process.env.HEALTH_RETRY_MS || 5 * 60 * 1000),
   healthFailThreshold: Number(process.env.HEALTH_FAIL_THRESHOLD || 3),
   tickMs: Number(process.env.TICK_MS || 15000),
-  runTimeoutMs: Number(process.env.RUN_TIMEOUT_MS || 6 * 60 * 60 * 1000)
+  runTimeoutMs: Number(process.env.RUN_TIMEOUT_MS || 6 * 60 * 60 * 1000),
+  // Telegram 通知接口地址（可被环境变量覆盖，主要供自测指向本地假服务器）
+  telegramApiBase: process.env.TELEGRAM_API_BASE || 'https://api.telegram.org'
 };

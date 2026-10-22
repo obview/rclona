@@ -5,6 +5,7 @@ import { fmtTimeSec, fmtDuration, fmtBytes } from '../util.js';
 
 export function runSummary(run) {
   if (run.status === 'running') return '正在备份中…';
+  if (run.status === 'skipped') return run.reasonZh || '已跳过';
   if (run.status === 'success') {
     const s = run.stats || {};
     if (s.transferred) return `传输了 ${s.transferred} 个文件（${fmtBytes(s.bytes || 0)}）`;
@@ -13,7 +14,7 @@ export function runSummary(run) {
   return run.reasonZh || '备份失败';
 }
 
-export function RunRow({ run, onHandled, showTask = true }) {
+export function RunRow({ run, onHandled, showTask = true, highlighted = false }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   async function handle() {
@@ -24,7 +25,7 @@ export function RunRow({ run, onHandled, showTask = true }) {
   }
   const s = run.stats || {};
   return (
-    <div className="run-row">
+    <div className={`run-row${highlighted ? ' flash' : ''}`} id={`run-${run.id}`}>
       <BigStatus run={run} />
       <div className="rr-main">
         <div className="rr-title">
@@ -61,7 +62,7 @@ export function RunRow({ run, onHandled, showTask = true }) {
   );
 }
 
-export default function RunsPage() {
+export default function RunsPage({ focusRunId = '' }) {
   const [runs, setRuns] = useState(null);
   const [filter, setFilter] = useState('all');
   async function load() {
@@ -69,6 +70,12 @@ export default function RunsPage() {
     catch (e) { setRuns([]); }
   }
   useEffect(() => { load(); const t = setInterval(load, 8000); return () => clearInterval(t); }, []);
+  useEffect(() => {
+    if (!focusRunId || !runs) return;
+    if (filter !== 'all') setFilter('all');
+    const el = document.getElementById(`run-${focusRunId}`);
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [focusRunId, runs]); // eslint-disable-line react-hooks/exhaustive-deps
   const shown = (runs || []).filter((r) =>
     filter === 'all' ? true : filter === 'failed' ? (r.status === 'failed' && !r.handledAt) : r.status === filter);
   return (
@@ -83,6 +90,7 @@ export default function RunsPage() {
           <option value="all">全部记录</option>
           <option value="success">只看成功</option>
           <option value="failed">只看未处理失败</option>
+          <option value="skipped">只看已跳过</option>
           <option value="running">只看进行中</option>
         </select>
       </div>
@@ -91,7 +99,7 @@ export default function RunsPage() {
         {runs !== null && shown.length === 0 && (
           <div className="empty"><div className="e-ico"><Icon name="history" size={40} /></div>暂无符合条件的记录</div>
         )}
-        {shown.map((r) => <RunRow key={r.id} run={r} onHandled={load} />)}
+        {shown.map((r) => <RunRow key={r.id} run={r} onHandled={load} highlighted={r.id === focusRunId} />)}
       </div>
     </div>
   );

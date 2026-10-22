@@ -19,6 +19,7 @@ const PATHS = {
   play: 'M7 4.8v14.4L19 12z',
   trash: 'M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m3 0-1 13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1L5 7',
   bell: 'M6 16v-5a6 6 0 1 1 12 0v5l1.5 3h-15zM10 21a2.2 2.2 0 0 0 4 0',
+  pause: 'M9 5v14M15 5v14',
   refresh: 'M20 12a8 8 0 1 1-2.34-5.66M20 3v4h-4',
   up: 'M12 19V5m-6 6 6-6 6 6',
   logout: 'M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4m3 14 5-5-5-5m5 5H9'
@@ -29,6 +30,17 @@ export function Icon({ name, size = 18, sw = 1.8 }) {
       strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d={PATHS[name] || PATHS.cloud} />
     </svg>
+  );
+}
+
+// ---------- 圆圈问号详解（CSS 画的小圆圈 + 「?」，悬停/聚焦弹出详解气泡） ----------
+export function HelpTip({ text, titleText }) {
+  if (!text && !titleText) return null;
+  return (
+    <span className="help-tip" tabIndex={0} role="note" aria-label={text || titleText} title={titleText || undefined}>
+      <span className="help-q">?</span>
+      {text && <span className="help-bubble">{text}</span>}
+    </span>
   );
 }
 
@@ -47,6 +59,7 @@ export function BrandBadge({ remote, size = 46, fontSize }) {
 // ---------- 记录的大状态图标 ----------
 export function BigStatus({ run }) {
   if (run.status === 'running') return <div className="big-status run"><span className="spin" style={{ width: 22, height: 22 }} /></div>;
+  if (run.status === 'skipped') return <div className="big-status skip"><Icon name="pause" size={20} sw={2.6} /></div>;
   if (run.status === 'success') return <div className="big-status ok"><Icon name="check" size={24} sw={2.4} /></div>;
   if (run.status === 'failed' && run.handledAt) return <div className="big-status handled"><Icon name="check" size={24} sw={2.4} /></div>;
   return <div className="big-status fail"><Icon name="x" size={22} sw={2.4} /></div>;
@@ -54,6 +67,7 @@ export function BigStatus({ run }) {
 
 export function RunStatusWord({ run }) {
   if (run.status === 'running') return <span className="status-word word-run">备份中…</span>;
+  if (run.status === 'skipped') return <span className="status-word word-off">已跳过</span>;
   if (run.status === 'success') return <span className="status-word word-ok">备份成功</span>;
   if (run.status === 'failed' && run.handledAt) return <span className="status-word word-ok">已处理</span>;
   return <span className="status-word word-bad">备份失败</span>;

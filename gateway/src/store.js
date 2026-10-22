@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { normalizeSchedule } from './schedule.js';
 
 // 极简的 JSON 持久化：数据量很小（任务、记录、设置），整存整取 + 原子写
 const FILE = 'rclona.json';
@@ -9,16 +10,23 @@ export function newId() {
   return Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
 }
 
+const DEFAULT_STATS = () => ({
+  runs: 0, success: 0, failed: 0, // 累计完成备份次数（成功+失败，跳过不计）
+  bytes: 0, files: 0, // 累计传输量 / 文件数
+  lastRunFiles: null, lastRunBytes: null // 最近一次成功备份的传输文件数 / 字节数
+});
+
 const DEFAULTS = () => ({
   auth: null, // {user, salt, hash} —— 首次启动由环境变量或设置向导生成
   settings: {
-    notify: { enabled: false, to: '' },
-    smtp: { host: '', port: 465, secure: true, user: '', pass: '' }
+    telegram: { enabled: false, botToken: '', chatId: '' }
   },
   tasks: [],
   runs: [],
   health: {}, // remote 名 -> 自检状态
-  healthMeta: { lastDailyDate: '' }
+  healthMeta: { lastDailyDate: '' },
+  remoteState: {}, // remote 名 -> { paused }（网盘暂停状态，只存网关侧）
+  stats: DEFAULT_STATS()
 });
 
 export const store = {
@@ -32,7 +40,36 @@ export const store = {
       try {
         const parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
         this.data = { ...DEFAULTS(), ...parsed };
-        this.data.settings = { ...DEFAULTS().settings, ...(parsed.settings || {}) };
+        // 设置：只保留现行结构（老版本的邮箱/SMTP 设置直接丢弃，改用 Telegram）
+        this.data.settings = {
+          telegram: { ...DEFAULTS().settings.telegram, ...(parsed.settings?.telegram || {}) }
+        };
+        this.data.remoteState = parsed.remoteState || {};
+        // 任务：计划结构归一化（老结构 weekly 的单选 weekday → weekdays 数组等），补锚点
+        for (const t of this.data.tasks || []) {
+          t.schedule = normalizeSchedule(t.schedule);
+          if (!t.anchorAt) t.anchorAt = t.createdAt || new Date().toISOString();
+        }
+        // 累计计数：老数据没有就从已有运行记录里播种一次
+        if (parsed.stats) {
+          this.data.stats = { ...DEFAULT_STATS(), ...parsed.stats };
+        } else {
+          const st = DEFAULT_STATS();
+          const runs = [...(this.data.runs || [])].reverse(); // 从旧到新
+          for (const r of runs) {
+            if (r.status === 'success' || r.status === 'failed') {
+              st.runs++;
+              if (r.status === 'success') {
+                st.success++;
+                st.bytes += r.stats?.bytes || 0;
+                st.files += r.stats?.transferred || 0;
+                st.lastRunFiles = r.stats?.transferred ?? 0;
+                st.lastRunBytes = r.stats?.bytes ?? 0;
+              } else st.failed++;
+            }
+          }
+          this.data.stats = st;
+        }
       } catch (e) {
         console.error('[store] 记录文件损坏，已重置：', e.message);
         this.data = DEFAULTS();
@@ -54,5 +91,28 @@ export const store = {
     const r = this.data.runs.find((x) => x.id === id);
     if (r) { Object.assign(r, patch); this.save(); }
     return r;
+  },
+  // 一次备份完成（成功/失败）后累计计数；跳过不调用
+  bumpStats(run) {
+    const st = this.data.stats;
+    st.runs++;
+    if (run.status === 'success') {
+      st.success++;
+      st.bytes += run.stats?.bytes || 0;
+      st.files += run.stats?.transferred || 0;
+      st.lastRunFiles = run.stats?.transferred ?? 0;
+      st.lastRunBytes = run.stats?.bytes ?? 0;
+    } else if (run.status === 'failed') {
+      st.failed++;
+    }
+    this.save();
+  },
+  isPaused(name) {
+    return !!this.data.remoteState?.[name]?.paused;
+  },
+  setPaused(name, paused) {
+    if (!this.data.remoteState) this.data.remoteState = {};
+    this.data.remoteState[name] = { ...(this.data.remoteState[name] || {}), paused: !!paused };
+    this.save();
   }
 };

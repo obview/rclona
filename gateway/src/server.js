@@ -13,7 +13,18 @@ import { rc, normalizeProviders, fsSpec } from './rc.js';
 import { classifyError } from './classify.js';
 import { healthOf, testRemote } from './health.js';
 import { runTask, isRunning } from './runner.js';
-import { sendTestMail } from './mailer.js';
+import { sendTestTelegram } from './notifier.js';
+import { normalizeSchedule, nextSlotAfter, validateCron, validHM } from './schedule.js';
+import { nextHealthCheckAt } from './scheduler.js';
+
+const SERVER_STARTED_AT = new Date().toISOString();
+let rcloneVersionCache = '';
+async function rcloneVersion() {
+  if (!rcloneVersionCache) {
+    try { rcloneVersionCache = (await rc.version())?.version || ''; } catch { /* 拿不到就留空 */ }
+  }
+  return rcloneVersionCache;
+}
 
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
@@ -55,7 +66,7 @@ async function remoteList() {
   for (const name of names) {
     let type = '';
     try { const c = await rc.getRemote(name); type = c.type || ''; } catch { /* 忽略 */ }
-    out.push({ name, type, health: healthOf(name) });
+    out.push({ name, type, health: healthOf(name), paused: store.isPaused(name) });
   }
   return out;
 }
@@ -126,7 +137,13 @@ export function createServer() {
           return sendJson(res, 200, {
             remotes: await remoteList(),
             tasks: store.data.tasks,
-            runs: store.data.runs.slice(0, 20)
+            runs: store.data.runs.slice(0, 20),
+            stats: store.data.stats,
+            system: {
+              rcloneVersion: await rcloneVersion(),
+              startedAt: SERVER_STARTED_AT,
+              nextHealthCheckAt: nextHealthCheckAt()
+            }
           });
         }
 
@@ -154,18 +171,25 @@ export function createServer() {
           const test = await testRemote(name).catch((e) => ({ ok: false, cause: e.message }));
           return sendJson(res, 200, { ok: true, name, test });
         }
-        const remoteMatch = p.match(/^\/api\/remotes\/([^/]+)(?:\/(test))?$/);
+        const remoteMatch = p.match(/^\/api\/remotes\/([^/]+)(?:\/(test|pause|resume))?$/);
         if (remoteMatch) {
           const name = decodeURIComponent(remoteMatch[1]);
-          if (req.method === 'DELETE' && !remoteMatch[2]) {
+          const action = remoteMatch[2];
+          if (req.method === 'DELETE' && !action) {
             await rc.deleteRemote(name);
             delete store.data.health[name];
+            delete store.data.remoteState[name];
             store.save();
             return sendJson(res, 200, { ok: true });
           }
-          if (req.method === 'POST' && remoteMatch[2] === 'test') {
+          if (req.method === 'POST' && action === 'test') {
             const r = await testRemote(name);
             return sendJson(res, 200, r);
+          }
+          if (req.method === 'POST' && (action === 'pause' || action === 'resume')) {
+            store.setPaused(name, action === 'pause');
+            console.log(`[api] 网盘「${name}」已${action === 'pause' ? '暂停' : '恢复'}`);
+            return sendJson(res, 200, { ok: true, paused: action === 'pause' });
           }
         }
         if (p === '/api/browse' && req.method === 'GET') {
@@ -195,9 +219,13 @@ export function createServer() {
         if (p === '/api/tasks' && req.method === 'POST') {
           const b = await readBody(req);
           const task = validateTask(b);
+          const now = new Date();
           task.id = newId();
           task.enabled = true;
-          task.createdAt = new Date().toISOString();
+          task.createdAt = now.toISOString();
+          task.anchorAt = now.toISOString();
+          const next = nextSlotAfter(task.schedule, now, task.anchorAt);
+          task.nextRunAt = next ? next.toISOString() : null;
           task.lastRunAt = null; task.lastStatus = null; task.lastSlotKey = '';
           store.data.tasks.push(task);
           store.save();
@@ -209,7 +237,16 @@ export function createServer() {
           const task = store.data.tasks.find((x) => x.id === id);
           if (!task) return sendJson(res, 404, { error: '任务不存在' });
           if (req.method === 'PUT' && !taskMatch[2]) {
-            Object.assign(task, validateTask(await readBody(req)));
+            const patch = validateTask(await readBody(req));
+            const scheduleChanged = JSON.stringify(normalizeSchedule(patch.schedule)) !== JSON.stringify(normalizeSchedule(task.schedule));
+            Object.assign(task, patch);
+            if (scheduleChanged) {
+              // 计划改了：从「现在」起按下一次计划时刻重新排（与新建任务同语义）
+              const now = new Date();
+              if (task.schedule.type === 'hours' || task.schedule.type === 'days') task.anchorAt = now.toISOString();
+              const next = nextSlotAfter(task.schedule, now, task.anchorAt || task.createdAt);
+              task.nextRunAt = next ? next.toISOString() : null;
+            }
             store.save();
             return sendJson(res, 200, { task });
           }
@@ -220,6 +257,11 @@ export function createServer() {
           }
           if (req.method === 'POST' && taskMatch[2] === 'toggle') {
             task.enabled = !task.enabled;
+            // 重新启用时若下一次执行时间已经错过（停用期间），顺延到下一个未来时刻，不立即补跑
+            if (task.enabled && task.nextRunAt && new Date(task.nextRunAt) <= new Date()) {
+              const next = nextSlotAfter(task.schedule, new Date(), task.anchorAt || task.createdAt);
+              task.nextRunAt = next ? next.toISOString() : null;
+            }
             store.save();
             return sendJson(res, 200, { task });
           }
@@ -249,30 +291,28 @@ export function createServer() {
 
         // ---------- 设置 ----------
         if (p === '/api/settings' && req.method === 'GET') {
-          const s = JSON.parse(JSON.stringify(store.data.settings));
-          const passSet = !!s.smtp.pass;
-          s.smtp.pass = '';
-          return sendJson(res, 200, { settings: s, smtpPassSet: passSet });
+          const t = store.data.settings.telegram || {};
+          return sendJson(res, 200, {
+            settings: { telegram: { enabled: !!t.enabled, chatId: t.chatId || '' } },
+            botTokenSet: !!t.botToken
+          });
         }
         if (p === '/api/settings' && req.method === 'PUT') {
           const b = await readBody(req);
-          const next = {
-            notify: { enabled: !!b.notify?.enabled, to: String(b.notify?.to || '').trim() },
-            smtp: {
-              host: String(b.smtp?.host || '').trim(),
-              port: Number(b.smtp?.port) || 465,
-              secure: b.smtp?.secure !== false,
-              user: String(b.smtp?.user || '').trim(),
-              pass: String(b.smtp?.pass || '')
+          const prev = store.data.settings.telegram || {};
+          const botToken = String(b.telegram?.botToken || '').trim();
+          store.data.settings = {
+            telegram: {
+              enabled: !!b.telegram?.enabled,
+              botToken: botToken || prev.botToken || '', // 留空 = 不改已保存的令牌
+              chatId: String(b.telegram?.chatId || '').trim()
             }
           };
-          if (!next.smtp.pass) next.smtp.pass = store.data.settings.smtp.pass; // 留空=不改
-          store.data.settings = next;
           store.save();
           return sendJson(res, 200, { ok: true });
         }
-        if (p === '/api/settings/test-email' && req.method === 'POST') {
-          await sendTestMail();
+        if (p === '/api/settings/test-telegram' && req.method === 'POST') {
+          await sendTestTelegram();
           return sendJson(res, 200, { ok: true });
         }
 
@@ -305,14 +345,23 @@ function validateTask(b) {
   const srcRemote = String(b.srcRemote || '').trim();
   const dstRemote = String(b.dstRemote || '').trim();
   if (!srcRemote || !dstRemote) throw new Error('源网盘和目标网盘都要选');
-  const schedType = b.schedule?.type === 'weekly' ? 'weekly' : 'daily';
-  const time = /^\d{2}:\d{2}$/.test(b.schedule?.time || '') ? b.schedule.time : '03:30';
+  const raw = b.schedule || {};
+  const schedule = normalizeSchedule(raw);
+  if (schedule.type === 'cron') {
+    if (!schedule.cron) throw new Error('选择了 cron 方式，就要填 cron 表达式');
+    try { validateCron(schedule.cron); }
+    catch (e) { throw new Error(`cron 表达式有问题：${e.message}`); }
+  }
+  if (raw.time !== undefined && raw.time !== '' && !/^\d{2}:\d{2}$/.test(raw.time)) {
+    throw new Error('执行时间格式不对（例如 03:30）');
+  }
+  if (schedule.time) schedule.time = validHM(schedule.time);
   return {
     name: name || `${srcRemote} → ${dstRemote}`,
     srcRemote,
     srcPath: String(b.srcPath || '').replace(/\/+$/, ''),
     dstRemote,
     dstPath: String(b.dstPath || '').replace(/\/+$/, ''),
-    schedule: { type: schedType, time, weekday: Math.min(6, Math.max(0, Number(b.schedule?.weekday ?? 1))) }
+    schedule
   };
 }

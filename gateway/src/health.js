@@ -1,12 +1,13 @@
 import { store } from './store.js';
 import { rc, fsSpec } from './rc.js';
 import { classifyError } from './classify.js';
-import { sendRemoteDownMail } from './mailer.js';
+import { notifyRemoteDown, notifyRemoteRecovered } from './notifier.js';
 import { cfg } from './config.js';
 
 // 网盘连通自检状态机：
-// ok --失败--> retrying（每 healthRetryMs 复测）--连败达阈值--> down（发邮件）
-// 任意一次成功 --> ok（down 自动解除）
+// ok --失败--> retrying（每 healthRetryMs 复测）--连败达阈值--> down（发 Telegram 通知）
+// 任意一次成功 --> ok（down 自动解除，解除时也发一条恢复通知）
+// 已暂停的网盘不参加定时自检（手动测试不受影响）
 function blankHealth() {
   return {
     status: 'unknown', failCount: 0, lastCheckAt: null, lastOkAt: null,
@@ -21,6 +22,8 @@ export function healthOf(name) {
 const inFlight = new Set(); // 防重入：同一网盘的检测不能并发（慢网盘会把调用堆死）
 
 export async function testRemote(name, { fromSchedule = false } = {}) {
+  // 已暂停：定时自检直接跳过，不改动状态、不发通知；手动测试照常执行
+  if (fromSchedule && store.isPaused(name)) return { ok: false, skipped: true, paused: true, cause: '网盘已暂停' };
   if (inFlight.has(name)) return { ok: false, skipped: true, cause: healthOf(name).cause };
   inFlight.add(name);
   const h = healthOf(name);
@@ -37,7 +40,10 @@ export async function testRemote(name, { fromSchedule = false } = {}) {
     h.nextCheckAt = null;
     h.lastOkAt = h.lastCheckAt;
     store.save();
-    if (wasDown) console.log(`[health] 网盘「${name}」已恢复连接`);
+    if (wasDown) {
+      console.log(`[health] 网盘「${name}」已恢复连接`);
+      notifyRemoteRecovered(name).catch(() => {});
+    }
     return { ok: true };
   } catch (e) {
     const { reasonZh } = classifyError(e.message);
@@ -53,7 +59,7 @@ export async function testRemote(name, { fromSchedule = false } = {}) {
       if (newlyDown && !h.notifiedDown) {
         h.notifiedDown = true;
         store.save();
-        sendRemoteDownMail(name, reasonZh).catch(() => {});
+        notifyRemoteDown(name, reasonZh).catch(() => {});
       }
       console.log(`[health] 网盘「${name}」判定连接失效：${reasonZh}`);
     } else {

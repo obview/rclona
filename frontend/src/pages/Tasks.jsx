@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { BrandBadge, FolderPicker, Icon, Modal } from '../components.jsx';
-import { fmtAgo, scheduleText, WEEKDAYS } from '../util.js';
+import { fmtAgo, fmtTime, scheduleText, WEEKDAYS } from '../util.js';
 
 function TaskForm({ remotes, initial, onDone, toast }) {
   const [name, setName] = useState(initial?.name || '');
@@ -10,24 +10,41 @@ function TaskForm({ remotes, initial, onDone, toast }) {
   const [dstRemote, setDstRemote] = useState(initial?.dstRemote || '');
   const [dstPath, setDstPath] = useState(initial?.dstPath || '');
   const [picking, setPicking] = useState(''); // 'src' | 'dst' | ''
-  const [schedType, setSchedType] = useState(initial?.schedule?.type || 'daily');
-  const [time, setTime] = useState(initial?.schedule?.time || '03:30');
-  const [weekday, setWeekday] = useState(initial?.schedule?.weekday ?? 1);
+  const s0 = initial?.schedule || {};
+  const [schedType, setSchedType] = useState(s0.type || 'daily');
+  const [time, setTime] = useState(s0.time || '03:30');
+  const [weekdays, setWeekdays] = useState(
+    s0.weekdays && s0.weekdays.length ? s0.weekdays : (s0.weekday != null ? [s0.weekday] : [1]));
+  const [dayOfMonth, setDayOfMonth] = useState(s0.dayOfMonth ?? 1);
+  const [intervalHours, setIntervalHours] = useState(s0.intervalHours ?? 6);
+  const [intervalDays, setIntervalDays] = useState(s0.intervalDays ?? 3);
+  const [cron, setCron] = useState(s0.cron || '30 3 * * *');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
   const srcR = remotes.find((r) => r.name === srcRemote);
   const dstR = remotes.find((r) => r.name === dstRemote);
 
+  function toggleWeekday(d) {
+    setWeekdays((prev) => prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d].sort((a, b) => a - b));
+  }
+
   async function save() {
     setErr('');
     if (!srcRemote || !dstRemote) { setErr('请先选好源网盘和目标网盘'); return; }
     if (srcRemote === dstRemote && srcPath === dstPath) { setErr('源和目标不能是同一个位置'); return; }
+    if (schedType === 'weekly' && weekdays.length === 0) { setErr('每周方式至少要选一个星期'); return; }
+    if (schedType === 'cron' && cron.trim().split(/\s+/).length !== 5) { setErr('cron 表达式要是五段：分 时 日 月 周，例如 30 3 * * *'); return; }
     setSaving(true);
+    const schedule = { type: schedType, time };
+    if (schedType === 'weekly') schedule.weekdays = weekdays;
+    if (schedType === 'monthly') schedule.dayOfMonth = Number(dayOfMonth);
+    if (schedType === 'hours') schedule.intervalHours = Number(intervalHours);
+    if (schedType === 'days') schedule.intervalDays = Number(intervalDays);
+    if (schedType === 'cron') schedule.cron = cron.trim();
     const body = {
       name: name.trim() || `${srcRemote} → ${dstRemote}`,
-      srcRemote, srcPath, dstRemote, dstPath,
-      schedule: { type: schedType, time, weekday: Number(weekday) }
+      srcRemote, srcPath, dstRemote, dstPath, schedule
     };
     try {
       if (initial?.id) await api.put(`/tasks/${initial.id}`, body);
@@ -99,19 +116,60 @@ function TaskForm({ remotes, initial, onDone, toast }) {
           <label>定时方式</label>
           <select className="select" value={schedType} onChange={(e) => setSchedType(e.target.value)}>
             <option value="daily">每天</option>
-            <option value="weekly">每周</option>
+            <option value="weekly">每周（可选多天）</option>
+            <option value="monthly">每月</option>
+            <option value="hours">每隔几小时</option>
+            <option value="days">每隔几天</option>
+            <option value="cron">高级：cron 表达式</option>
           </select>
         </div>
         <div className="field">
-          <label>执行时间</label>
-          <div style={{ display: 'flex', gap: 8 }}>
-            {schedType === 'weekly' && (
-              <select className="select" value={weekday} onChange={(e) => setWeekday(e.target.value)}>
-                {WEEKDAYS.map((w, i) => <option key={i} value={i}>{w}</option>)}
-              </select>
-            )}
+          <label>{schedType === 'hours' ? '间隔' : schedType === 'cron' ? 'cron 表达式' : '执行时间'}</label>
+          {schedType === 'weekly' && (
+            <div className="wd-chips" style={{ marginBottom: 8 }}>
+              {WEEKDAYS.map((w, i) => (
+                <button type="button" key={i}
+                  className={`wd-chip${weekdays.includes(i) ? ' on' : ''}`}
+                  onClick={() => toggleWeekday(i)}>{w.replace('周', '')}</button>
+              ))}
+            </div>
+          )}
+          {schedType === 'monthly' && (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+              <span style={{ color: 'var(--text-2)', fontSize: 13 }}>每月</span>
+              <input className="input" type="number" min="1" max="31" style={{ width: 84 }}
+                value={dayOfMonth} onChange={(e) => setDayOfMonth(e.target.value)} />
+              <span style={{ color: 'var(--text-2)', fontSize: 13 }}>号（填 31 时，短月份自动按最后一天跑）</span>
+            </div>
+          )}
+          {schedType === 'hours' && (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <span style={{ color: 'var(--text-2)', fontSize: 13 }}>每隔</span>
+              <input className="input" type="number" min="1" max="720" style={{ width: 84 }}
+                value={intervalHours} onChange={(e) => setIntervalHours(e.target.value)} />
+              <span style={{ color: 'var(--text-2)', fontSize: 13 }}>小时执行一次（从保存时刻起算）</span>
+            </div>
+          )}
+          {schedType === 'days' && (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
+              <span style={{ color: 'var(--text-2)', fontSize: 13 }}>每隔</span>
+              <input className="input" type="number" min="1" max="365" style={{ width: 84 }}
+                value={intervalDays} onChange={(e) => setIntervalDays(e.target.value)} />
+              <span style={{ color: 'var(--text-2)', fontSize: 13 }}>天，在下面时间执行一次</span>
+            </div>
+          )}
+          {schedType === 'cron' && (
+            <>
+              <input className="input" value={cron} onChange={(e) => setCron(e.target.value)}
+                placeholder="分 时 日 月 周，例如 30 3 * * *" style={{ fontFamily: 'ui-monospace, Menlo, monospace' }} />
+              <div style={{ color: 'var(--text-3)', fontSize: 12.5, marginTop: 6 }}>
+                给熟悉 cron 的用户用的高级写法（五段：分 时 日 月 周），不熟悉就用上面几种方式，别改这个。
+              </div>
+            </>
+          )}
+          {schedType !== 'hours' && schedType !== 'cron' && (
             <input className="input" type="time" value={time} onChange={(e) => setTime(e.target.value)} />
-          </div>
+          )}
         </div>
       </div>
       <div className="note-box" style={{ marginTop: 16 }}>
@@ -154,7 +212,7 @@ export default function Tasks({ toast }) {
     setRunningId(task.id);
     try {
       await api.post(`/tasks/${task.id}/run`);
-      toast('已开始备份，去「运行记录」看进度');
+      toast('已开始备份，跑完会在右下角通知你');
     } catch (e) { toast(e.message, true); }
     setRunningId('');
     load();
@@ -188,8 +246,10 @@ export default function Tasks({ toast }) {
               </div>
               <div style={{ color: 'var(--text-3)', fontSize: 12.5 }}>
                 {scheduleText(t.schedule)}
+                {t.enabled && t.nextRunAt && t.lastStatus !== 'running' && <> · 下次执行 {fmtTime(t.nextRunAt)}</>}
                 {t.lastStatus === 'success' && <> · 上次成功 {fmtAgo(t.lastRunAt)}</>}
                 {t.lastStatus === 'failed' && <> · <span style={{ color: 'var(--red-dark)' }}>上次失败 {fmtAgo(t.lastRunAt)}</span></>}
+                {t.lastStatus === 'skipped' && <> · 上次已跳过（网盘暂停中）</>}
                 {t.lastStatus === 'running' && <> · <span style={{ color: 'var(--indigo-600)' }}>正在执行…</span></>}
                 {!t.lastStatus && <> · 尚未执行</>}
               </div>
@@ -202,7 +262,9 @@ export default function Tasks({ toast }) {
               <span className="track" />
             </label>
             <button className="btn btn-primary btn-sm" disabled={runningId === t.id || t.lastStatus === 'running'} onClick={() => runNow(t)}>
-              <Icon name="play" size={13} /> 立即执行
+              {t.lastStatus === 'running'
+                ? <><span className="spin" style={{ width: 13, height: 13, borderWidth: 2 }} /> 执行中…</>
+                : <><Icon name="play" size={13} /> 立即执行</>}
             </button>
             <button className="btn-link" onClick={() => setEditing(t)}>编辑</button>
             <button className="btn-link danger" onClick={() => remove(t)}>删除</button>

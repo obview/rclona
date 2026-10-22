@@ -59,6 +59,25 @@ function startFakeDav(port) {
   return new Promise((r) => srv.listen(port, '127.0.0.1', () => r(srv)));
 }
 
+// 假 Telegram Bot API：记录所有 sendMessage 请求，永远回 ok
+const TG_PORT = 18790;
+const tgMessages = [];
+function startFakeTelegram(port) {
+  const srv = http.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', () => {
+      let data = {};
+      try { data = JSON.parse(body); } catch { /* ignore */ }
+      tgMessages.push({ url: req.url, chat_id: data.chat_id, text: data.text || '' });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true, result: {} }));
+    });
+  });
+  return new Promise((r) => srv.listen(port, '127.0.0.1', () => r(srv)));
+}
+const tgHas = (a, b = '') => tgMessages.some((m) => m.text.includes(a) && m.text.includes(b));
+
 async function main() {
   fs.rmSync(T, { recursive: true, force: true });
   const srcDir = path.join(T, 'srcbase', 'data1');
@@ -81,12 +100,19 @@ async function main() {
     HEALTH_DAILY_TIME: '23:59',
     HEALTH_RETRY_MS: '1200',
     HEALTH_FAIL_THRESHOLD: '3',
-    TICK_MS: '800'
+    TICK_MS: '800',
+    TELEGRAM_API_BASE: `http://127.0.0.1:${TG_PORT}`
   };
-  const gw = spawn('node', ['src/index.js'], { cwd: path.join(ROOT, 'gateway'), env, stdio: 'pipe' });
   let gwLog = '';
-  gw.stdout.on('data', (d) => { gwLog += d; });
-  gw.stderr.on('data', (d) => { gwLog += d; });
+  let gw = null;
+  function spawnGw() {
+    const p = spawn('node', ['src/index.js'], { cwd: path.join(ROOT, 'gateway'), env, stdio: 'pipe' });
+    p.stdout.on('data', (d) => { gwLog += d; });
+    p.stderr.on('data', (d) => { gwLog += d; });
+    return p;
+  }
+  gw = spawnGw();
+  const tgSrv = await startFakeTelegram(TG_PORT);
 
   try {
     console.log('== 1. 启动与鉴权 ==');
@@ -98,6 +124,21 @@ async function main() {
     ok(badLogin.status === 401, '错误密码登录被拒');
     const login = await api('POST', '/api/auth/login', { user: 'tester', password: 'testpass123' });
     ok(login.status === 200, '正确密码登录成功');
+
+    console.log('== 1b. Telegram 通知配置与测试消息 ==');
+    const putTg = await api('PUT', '/api/settings', {
+      telegram: { enabled: true, botToken: 'TESTTOKEN123', chatId: '424242' }
+    });
+    ok(putTg.status === 200, 'Telegram 设置可保存');
+    const getTg = await api('GET', '/api/settings');
+    ok(getTg.data.botTokenSet === true && getTg.data.settings?.telegram?.chatId === '424242'
+      && !JSON.stringify(getTg.data).includes('TESTTOKEN123'),
+      '设置回读：令牌不回显明文、Chat ID 正确、无旧 SMTP 字段');
+    const testTg = await api('POST', '/api/settings/test-telegram');
+    ok(testTg.status === 200, '测试通知接口成功');
+    const tgTest = tgMessages.find((m) => m.text.includes('测试通知'));
+    ok(!!tgTest && tgTest.url === '/botTESTTOKEN123/sendMessage' && String(tgTest.chat_id) === '424242',
+      '假 Telegram 服务器收到格式正确的测试消息', tgTest ? `url=${tgTest.url} chat=${tgTest.chat_id}` : '未收到');
 
     console.log('== 2. 创建本地目录网盘 ==');
     const r1 = await api('POST', '/api/remotes', { name: 'tsrc', type: 'local', config: {} });
@@ -160,6 +201,9 @@ async function main() {
     }, 60000);
     ok(runBad1.status === 'failed' && runBad1.failedStage === 0, '源不存在 → 失败定位在阶段1（连接源网盘）',
       `阶段=${runBad1.failedStage} 原因=${runBad1.reasonZh}`);
+    const tgFail = await waitFor(async () => tgHas('备份失败', '源不存在') || null, 10000).catch(() => null);
+    ok(!!tgFail && tgHas('连接源网盘'), '备份失败已通过 Telegram 发出（带任务名与失败阶段）',
+      tgFail ? '' : `已收到 ${tgMessages.length} 条：${tgMessages.map((m) => m.text.split('\n')[0]).join(' | ')}`);
 
     const filePath = path.join(T, 'afile.txt');
     fs.writeFileSync(filePath, 'i am a file');
@@ -180,26 +224,66 @@ async function main() {
     const handled = await api('POST', `/api/runs/${runBad2.id}/handle`);
     ok(handled.status === 200 && !!handled.data.run.handledAt, '失败记录可标记已处理');
 
-    console.log('== 6. 网盘自检状态机（连败3次判失效 → 恢复自动解除）==');
+    console.log('== 6. 网盘自检状态机 + 暂停语义 + Telegram 失效/恢复通知 ==');
     const DAVPORT = 18787;
     const bad = await api('POST', '/api/remotes', {
       name: 'tdav', type: 'webdav', config: { url: `http://127.0.0.1:${DAVPORT}/dav` }
     });
-    ok(bad.status === 200 && bad.data.test?.ok === false, '假网盘创建（自动首测失败）');
-    let davRemote = null;
-    davRemote = await waitFor(async () => {
-      const d = await api('GET', '/api/remotes');
-      const r = d.data.remotes.find((x) => x.name === 'tdav');
+    ok(bad.status === 200 && bad.data.test?.ok === false, '假网盘创建（自动首测失败，进复测节奏）');
+    const getRemote = async (n) => (await api('GET', '/api/remotes')).data.remotes.find((x) => x.name === n);
+
+    // 6a 暂停：自检冻结（failCount 与 lastCheckAt 不再变化），且暂停网盘的任务跳过不算失败
+    const pauseRes = await api('POST', '/api/remotes/tdav/pause');
+    ok(pauseRes.status === 200 && pauseRes.data.paused === true, '网盘可暂停');
+    ok((await getRemote('tdav'))?.paused === true, '网盘列表带 paused 标记');
+    // 等可能在途的一次复测落定（failCount 到 2 或超时），之后数值应被冻结
+    await waitFor(async () => {
+      const r = await getRemote('tdav');
+      return (r?.health?.failCount >= 2) ? r : null;
+    }, 60000).catch(() => null);
+    await sleep(22000); // 覆盖多个复测间隔：若暂停没生效，failCount 会继续涨到 3 并判 down
+    const frozenA = await getRemote('tdav');
+    await sleep(22000); // 再隔一段采样一次，两次一致才算真冻结（排除采样时正好有在途检查）
+    const frozen2 = await getRemote('tdav');
+    ok(frozenA.health.failCount === frozen2.health.failCount
+      && frozenA.health.lastCheckAt === frozen2.health.lastCheckAt
+      && frozen2.health.status !== 'down',
+      '暂停期间自检被跳过（失败计数与检查时间冻结、未判失效）',
+      `failCount ${frozenA.health.failCount} → ${frozen2.health.failCount}，状态=${frozen2.health.status}`);
+
+    const skipTask = await api('POST', '/api/tasks', {
+      name: '暂停跳过', srcRemote: 'tdav', srcPath: '',
+      dstRemote: 'tdst', dstPath: dstDir, schedule: { type: 'daily', time: '04:00' }
+    });
+    await api('POST', `/api/tasks/${skipTask.data.task.id}/run`);
+    const skipRun = await waitFor(async () => {
+      const d = await api('GET', `/api/runs?taskId=${skipTask.data.task.id}`);
+      return d.data.runs?.[0] || null;
+    }, 15000);
+    ok(skipRun.status === 'skipped' && /已暂停/.test(skipRun.reasonZh || ''),
+      '用到暂停网盘的任务被跳过并留记录（不算失败）', `状态=${skipRun.status} 原因=${skipRun.reasonZh}`);
+    ok(!tgHas('备份失败', '暂停跳过'), '跳过不发失败 Telegram 通知');
+
+    // 6b 恢复：继续复测 → 连败达阈值判失效并发 Telegram；服务上线后自动恢复并再发一条
+    const resumeRes = await api('POST', '/api/remotes/tdav/resume');
+    ok(resumeRes.status === 200 && resumeRes.data.paused === false, '网盘可恢复');
+    const davDown = await waitFor(async () => {
+      const r = await getRemote('tdav');
       return r?.health?.status === 'down' ? r : null;
     }, 150000); // 每次失败检查约 16s（rclone 对 WebDAV 的内部重试），放宽等待
-    ok(true, '复测节奏自动推进至「连接失效」（down）', `failCount=${davRemote.health.failCount} 原因=${davRemote.health.cause}`);
+    ok(true, '恢复后复测继续推进至「连接失效」（down）', `failCount=${davDown.health.failCount} 原因=${davDown.health.cause}`);
+    const tgDown = await waitFor(async () => tgHas('网盘连接失效', 'tdav') || null, 10000).catch(() => null);
+    ok(!!tgDown, '网盘失效已通过 Telegram 发出',
+      tgDown ? '' : `已收到 ${tgMessages.length} 条：${tgMessages.map((m) => m.text.split('\n')[0]).join(' | ')}`);
     const davSrv = await startFakeDav(DAVPORT);
     const recovered = await waitFor(async () => {
-      const d = await api('GET', '/api/remotes');
-      const r = d.data.remotes.find((x) => x.name === 'tdav');
+      const r = await getRemote('tdav');
       return r?.health?.status === 'ok' ? r : null;
     }, 90000);
     ok(!!recovered, '假 WebDAV 上线后无需人工干预自动恢复为连接正常');
+    const tgRec = await waitFor(async () => tgHas('网盘已恢复', 'tdav') || null, 10000).catch(() => null);
+    ok(!!tgRec, '网盘恢复已通过 Telegram 发出',
+      tgRec ? '' : `已收到 ${tgMessages.length} 条：${tgMessages.map((m) => m.text.split('\n')[0]).join(' | ')}`);
     davSrv.close();
 
     console.log('== 7. 概览聚合接口 ==');
@@ -242,18 +326,108 @@ async function main() {
     await sleep(3000); // TICK_MS=800，至少等 3 个调度 tick
     const runsLate = await api('GET', `/api/runs?taskId=${tLate.data.task.id}`);
     ok((runsLate.data.runs || []).length === 0, '新建任务未被立即补跑（无运行记录）');
-    if (pastTime < nowTime) {
-      // 同一天内：调度器应已把这个「出生前」的 slot 登记为已处理，明天到点才会真正执行
-      const tasksNow = await api('GET', '/api/tasks');
-      const lt = tasksNow.data.tasks.find((x) => x.id === tLate.data.task.id);
-      ok(!!lt?.lastSlotKey, '调度器已登记该 slot（下一个计划时刻会正常触发）', `lastSlotKey=${lt?.lastSlotKey}`);
-    }
+    const tasksNow = await api('GET', '/api/tasks');
+    const lt = tasksNow.data.tasks.find((x) => x.id === tLate.data.task.id);
+    const ltNext = lt?.nextRunAt ? new Date(new Date(lt.nextRunAt).toLocaleString('en-US', { timeZone: 'Asia/Shanghai' })) : null;
+    ok(!!ltNext && ltNext > shNow && `${p2(ltNext.getHours())}:${p2(ltNext.getMinutes())}` === pastTime,
+      '下一次执行已排到明天的同一时刻', `nextRunAt=${lt?.nextRunAt}`);
+
+    console.log('== 10. 新计划类型：nextRunAt 计算与校验 ==');
+    const hmOf = (iso) => {
+      const d = new Date(new Date(iso).toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+      return { str: `${p2(d.getHours())}:${p2(d.getMinutes())}`, day: d.getDay(), date: d.getDate(), d };
+    };
+    const mkTask = async (name, schedule) => {
+      const r = await api('POST', '/api/tasks', {
+        name, srcRemote: 'tsrc', srcPath: srcDir, dstRemote: 'tdst', dstPath: dstDir, schedule
+      });
+      return r;
+    };
+    // 每月
+    const tMon = await mkTask('计划-每月', { type: 'monthly', time: '03:00', dayOfMonth: 1 });
+    const monNext = tMon.data.task?.nextRunAt ? hmOf(tMon.data.task.nextRunAt) : null;
+    ok(tMon.status === 200 && !!monNext && monNext.date === 1 && monNext.str === '03:00'
+      && new Date(tMon.data.task.nextRunAt) > new Date(),
+      '每月：下一次落在 1 号 03:00 且在未来', `nextRunAt=${tMon.data.task?.nextRunAt}`);
+    // 每周多选
+    const tWeek = await mkTask('计划-每周多选', { type: 'weekly', time: '03:30', weekdays: [5, 1, 3] });
+    const weekNext = tWeek.data.task?.nextRunAt ? hmOf(tWeek.data.task.nextRunAt) : null;
+    ok(tWeek.status === 200 && !!weekNext && [1, 3, 5].includes(weekNext.day) && weekNext.str === '03:30'
+      && JSON.stringify(tWeek.data.task.schedule.weekdays) === '[1,3,5]',
+      '每周多选：星期被排序保存、下一次落在所选星期', `nextRunAt=${tWeek.data.task?.nextRunAt} 周${weekNext?.day}`);
+    // 每隔 N 小时（锚点 = 创建时间）
+    const tHours = await mkTask('计划-每隔小时', { type: 'hours', intervalHours: 6 });
+    const hoursDiff = tHours.data.task ? (new Date(tHours.data.task.nextRunAt) - new Date(tHours.data.task.createdAt)) : 0;
+    ok(tHours.status === 200 && Math.abs(hoursDiff - 6 * 3600000) < 5000,
+      '每隔 N 小时：下一次 = 创建时间 + 6 小时', `diff=${Math.round(hoursDiff / 1000)}s`);
+    await sleep(2500);
+    const runsHours = await api('GET', `/api/runs?taskId=${tHours.data.task.id}`);
+    ok((runsHours.data.runs || []).length === 0, '每隔 N 小时：新建后不立即执行');
+    // 每隔 N 天
+    const tDays = await mkTask('计划-每隔天', { type: 'days', time: '04:00', intervalDays: 3 });
+    const daysNext = tDays.data.task?.nextRunAt ? hmOf(tDays.data.task.nextRunAt) : null;
+    const anchorDay = new Date(new Date(tDays.data.task.createdAt).toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+    const dayDiff = daysNext ? Math.round((new Date(daysNext.d.toDateString()) - new Date(anchorDay.toDateString())) / 86400000) : -1;
+    ok(tDays.status === 200 && !!daysNext && daysNext.str === '04:00' && dayDiff % 3 === 0
+      && new Date(tDays.data.task.nextRunAt) > new Date(),
+      '每隔 N 天：下一次在锚点日期 + 3 的倍数天、04:00', `nextRunAt=${tDays.data.task?.nextRunAt} 相隔 ${dayDiff} 天`);
+    // cron
+    const tCron = await mkTask('计划-cron', { type: 'cron', cron: '*/30 * * * *' });
+    const cronNextMs = tCron.data.task?.nextRunAt ? new Date(tCron.data.task.nextRunAt).getTime() : 0;
+    const cronHm = tCron.data.task?.nextRunAt ? hmOf(tCron.data.task.nextRunAt) : null;
+    ok(tCron.status === 200 && cronNextMs > Date.now() && cronNextMs - Date.now() <= 30 * 60000 + 5000
+      && cronHm && Number(cronHm.str.split(':')[1]) % 30 === 0,
+      'cron：下一次落在下一个半点刻度内', `nextRunAt=${tCron.data.task?.nextRunAt}`);
+    const badCron = await mkTask('计划-cron非法', { type: 'cron', cron: '99 * * * *' });
+    ok(badCron.status !== 200 && /cron/.test(badCron.data?.error || ''),
+      'cron 非法表达式被拒绝', `status=${badCron.status} err=${badCron.data?.error || ''}`);
+
+    console.log('== 11. 概览新字段：累计计数与系统信息 ==');
+    const ov2 = await api('GET', '/api/overview');
+    const ovStats = ov2.data.stats || {};
+    ok(ovStats.runs === 5 && ovStats.success === 3 && ovStats.failed === 2,
+      '累计计数正确（成功 3 + 失败 2，跳过不计）', JSON.stringify(ovStats));
+    ok(ovStats.bytes > 0 && ovStats.files >= 3 && ovStats.lastRunFiles === runAuto.stats?.transferred,
+      '累计传输量/文件数与最近一次文件数正确', `bytes=${ovStats.bytes} files=${ovStats.files} lastRunFiles=${ovStats.lastRunFiles}`);
+    ok(!!ov2.data.system?.rcloneVersion && !!ov2.data.system?.startedAt && !!ov2.data.system?.nextHealthCheckAt,
+      '系统信息齐全（rclone 版本/启动时间/下次自检）', JSON.stringify(ov2.data.system));
+    ok(ov2.data.tasks.every((t) => 'nextRunAt' in t), '每个任务都带 nextRunAt');
+
+    console.log('== 12. 老数据迁移：旧计划结构与旧设置在重启后被归一化 ==');
+    gw.kill('SIGTERM');
+    await sleep(1200);
+    gw.kill('SIGKILL');
+    const dataFile = path.join(T, 'data', 'rclona.json');
+    const saved = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+    const threeDaysAgo = new Date(Date.now() - 3 * 86400000).toISOString();
+    saved.tasks.push({
+      id: 'legacy-task-1', name: '老任务迁移', srcRemote: 'tsrc', srcPath: srcDir,
+      dstRemote: 'tdst', dstPath: dstDir, enabled: true,
+      createdAt: threeDaysAgo, lastRunAt: threeDaysAgo, lastStatus: 'success', lastSlotKey: '',
+      schedule: { type: 'weekly', time: '05:00', weekday: 2 }
+    });
+    saved.settings = { notify: { enabled: true, to: 'old@example.com' }, smtp: { host: 'smtp.example.com', port: 465, secure: true, user: 'u', pass: 'p' } };
+    fs.writeFileSync(dataFile, JSON.stringify(saved, null, 2));
+    cookie = ''; // 会话是内存态，重启后要重新登录
+    gw = spawnGw();
+    await waitFor(async () => (await api('GET', '/api/auth/me')).status === 200, 20000);
+    const relogin = await api('POST', '/api/auth/login', { user: 'tester', password: 'testpass123' });
+    ok(relogin.status === 200, '重启后可重新登录');
+    const tasksAfter = await api('GET', '/api/tasks');
+    const legacy = tasksAfter.data.tasks.find((t) => t.id === 'legacy-task-1');
+    ok(!!legacy && JSON.stringify(legacy.schedule.weekdays) === '[2]' && !!legacy.anchorAt && !!legacy.nextRunAt,
+      '老 weekly 任务被迁移（weekday → weekdays、补 anchorAt 与 nextRunAt）',
+      legacy ? JSON.stringify(legacy.schedule) + ` next=${legacy.nextRunAt}` : '任务丢了');
+    const settingsAfter = await api('GET', '/api/settings');
+    ok(!!settingsAfter.data.settings?.telegram && !('smtp' in settingsAfter.data.settings) && settingsAfter.data.botTokenSet === false,
+      '旧邮箱/SMTP 设置被丢弃、改为 Telegram 结构（令牌未设置）');
 
     console.log(failures === 0 ? '\n全部自测通过 ✅' : `\n有 ${failures} 项未通过 ❌`);
   } finally {
     gw.kill('SIGTERM');
     await sleep(600);
     gw.kill('SIGKILL');
+    tgSrv.close();
   }
   if (failures) { console.log('\n--- 网关日志（末尾）---\n' + gwLog.slice(-2500)); process.exit(1); }
 }

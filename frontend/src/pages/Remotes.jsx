@@ -1,9 +1,8 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
-import { BrandBadge, Icon, Modal } from '../components.jsx';
+import { BrandBadge, HelpTip, Icon, Modal } from '../components.jsx';
+import { fieldHelp, s3ProviderLabel, typeLabel } from '../fieldhelp.js';
 import { fmtAgo } from '../util.js';
-
-const TYPE_LABELS = { s3: 'S3 / 对象存储', koofr: 'Koofr', webdav: 'WebDAV', local: '本地目录' };
 
 function ProviderForm({ providers, onDone, toast }) {
   const [type, setType] = useState('s3');
@@ -16,8 +15,23 @@ function ProviderForm({ providers, onDone, toast }) {
   const def = providers?.[type];
   const options = useMemo(() => {
     if (!def) return [];
-    return (def.options || []).filter((o) => !o.hide);
-  }, [def]);
+    const all = (def.options || []).filter((o) => !o.hide);
+    // 同名字段可能按服务商重复定义（如 koofr 的 password 有 koofr/digistorage/other 三份）：
+    // 只保留与当前所选服务商匹配的一份（没选时保留无厂商限定的那份，再不行取第一份）
+    const byName = new Map();
+    for (const o of all) {
+      if (!byName.has(o.name)) byName.set(o.name, []);
+      byName.get(o.name).push(o);
+    }
+    const picked = [];
+    for (const group of byName.values()) {
+      if (group.length === 1) { picked.push(group[0]); continue; }
+      picked.push(group.find((o) => o.provider && o.provider === values.provider)
+        || group.find((o) => !o.provider) || group[0]);
+    }
+    // 保持原始顺序
+    return all.filter((o) => picked.includes(o));
+  }, [def, values.provider]);
   const basic = options.filter((o) => !o.advanced);
   const adv = options.filter((o) => o.advanced);
 
@@ -31,11 +45,20 @@ function ProviderForm({ providers, onDone, toast }) {
         </select>
       );
     }
+    // S3 的服务商字段：选项很多，做成带中文名的下拉
+    if (type === 's3' && o.name === 'provider' && o.examples && o.examples.length > 0) {
+      return (
+        <select className="select" value={v} onChange={(e) => set(e.target.value)}>
+          <option value="">（请选择服务商）</option>
+          {o.examples.map((ex) => <option key={ex.value} value={ex.value}>{s3ProviderLabel(ex.value)}</option>)}
+        </select>
+      );
+    }
     if (o.examples && o.examples.length > 0 && o.examples.length <= 12) {
       return (
         <select className="select" value={v} onChange={(e) => set(e.target.value)}>
           <option value="">（不填）</option>
-          {o.examples.map((ex) => <option key={ex.value} value={ex.value}>{ex.value}{ex.help ? ` — ${ex.help}` : ''}</option>)}
+          {o.examples.map((ex) => <option key={ex.value} value={ex.value}>{ex.value}</option>)}
         </select>
       );
     }
@@ -49,12 +72,20 @@ function ProviderForm({ providers, onDone, toast }) {
   }
 
   function renderOptions(list) {
-    return list.map((o) => (
-      <div className="field" key={o.name}>
-        <label>{o.name}{o.required ? ' *' : ''} <span className="hint">{o.help ? o.help.split('\n')[0].slice(0, 90) : ''}</span></label>
-        {field(o)}
-      </div>
-    ));
+    return list.map((o) => {
+      const help = fieldHelp(type, o.name, values.provider);
+      // 没收录进词典的字段：给中文兜底，英文原文只放进问号图标的 title（悬停原生提示）
+      const brief = help?.brief || (o.advanced ? '一般不用改（高级选项）' : o.required ? '必填项，按服务商提供的值填写' : '可选，一般可留空');
+      return (
+        <div className="field" key={o.name + (o.provider || '')}>
+          <label>
+            {o.name}{o.required ? ' *' : ''} <span className="hint">{brief}</span>{' '}
+            <HelpTip text={help?.detail || ''} titleText={help?.detail ? '' : (o.help || '')} />
+          </label>
+          {field(o)}
+        </div>
+      );
+    });
   }
 
   async function submit() {
@@ -78,7 +109,7 @@ function ProviderForm({ providers, onDone, toast }) {
           <label>网盘类型</label>
           <select className="select" value={type} onChange={(e) => { setType(e.target.value); setValues({}); }}>
             {providers && Object.keys(providers).map((t) => (
-              <option key={t} value={t}>{TYPE_LABELS[t] || t}</option>
+              <option key={t} value={t}>{typeLabel(t)}</option>
             ))}
           </select>
         </div>
@@ -159,6 +190,13 @@ export default function Remotes({ toast, nav }) {
     toast('网盘已删除');
     load();
   }
+  async function togglePause(r) {
+    try {
+      await api.post(`/remotes/${encodeURIComponent(r.name)}/${r.paused ? 'resume' : 'pause'}`);
+      toast(r.paused ? `网盘「${r.name}」已恢复` : `网盘「${r.name}」已暂停（自检跳过、用它的任务会跳过）`);
+    } catch (e) { toast(e.message, true); }
+    load();
+  }
 
   return (
     <div>
@@ -179,20 +217,24 @@ export default function Remotes({ toast, nav }) {
           </div>
         )}
         {(remotes || []).map((r) => (
-          <div className="task-row" key={r.name}>
+          <div className="task-row" key={r.name} style={r.paused ? { opacity: 0.82 } : undefined}>
             <BrandBadge remote={r} size={46} />
             <div style={{ flex: 1 }}>
               <div style={{ fontWeight: 700, fontSize: 15 }}>{r.name}</div>
               <div style={{ color: 'var(--text-3)', fontSize: 12.5 }}>
-                类型：{TYPE_LABELS[r.type] || r.type}
+                类型：{typeLabel(r.type)}
                 {r.health?.lastCheckAt && <> · 上次检查 {fmtAgo(r.health.lastCheckAt)}</>}
               </div>
             </div>
-            {r.health?.status === 'down' && <span className="pill pill-fail">✕ 连接失效</span>}
-            {r.health?.status === 'retrying' && <span className="pill pill-run">连接异常</span>}
-            {r.health?.status === 'ok' && <span className="pill pill-ok">✓ 连接正常</span>}
+            {r.paused && <span className="pill pill-off">已暂停</span>}
+            {!r.paused && r.health?.status === 'down' && <span className="pill pill-fail">✕ 连接失效</span>}
+            {!r.paused && r.health?.status === 'retrying' && <span className="pill pill-run">连接异常</span>}
+            {!r.paused && r.health?.status === 'ok' && <span className="pill pill-ok">✓ 连接正常</span>}
             <button className="btn btn-ghost btn-sm" disabled={testing === r.name} onClick={() => test(r)}>
               <Icon name="refresh" size={13} /> {testing === r.name ? '测试中…' : '测试连接'}
+            </button>
+            <button className="btn btn-ghost btn-sm" onClick={() => togglePause(r)}>
+              <Icon name={r.paused ? 'play' : 'pause'} size={13} /> {r.paused ? '恢复' : '暂停'}
             </button>
             <button className="btn-link" onClick={() => nav('tasks')}>建备份任务</button>
             <button className="btn-link danger" onClick={() => remove(r)}>删除</button>

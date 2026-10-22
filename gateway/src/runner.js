@@ -1,7 +1,7 @@
 import { store, newId } from './store.js';
 import { rc, fsSpec } from './rc.js';
 import { stageReason, classifyError } from './classify.js';
-import { sendBackupFailureMail } from './mailer.js';
+import { notifyBackupFailure } from './notifier.js';
 import { cfg } from './config.js';
 
 // 备份执行：固定五阶段。先做飞行前检查（把失败定位到阶段），再跑真正的 sync，最后校验
@@ -36,6 +36,34 @@ async function scanSource(fs) {
 
 export async function runTask(task, trigger = 'manual') {
   if (running.has(task.id)) return { skipped: true, reason: '该任务正在执行中' };
+
+  // 网盘已暂停：本次跳过，留一条「已跳过」记录（不算失败、不发通知、不计入累计备份次数）
+  const pausedRemote = [task.srcRemote, task.dstRemote].find((n) => store.isPaused(n));
+  if (pausedRemote) {
+    const nowIso = new Date().toISOString();
+    const run = {
+      id: newId(),
+      taskId: task.id,
+      taskName: task.name,
+      trigger,
+      startedAt: nowIso,
+      finishedAt: nowIso,
+      status: 'skipped',
+      failedStage: -1,
+      failedStageLabel: '',
+      reasonZh: `网盘「${pausedRemote}」已暂停，本次备份跳过`,
+      stages: STAGES.map((s) => ({ key: s.key, label: s.label, status: 'skipped', durationMs: null })),
+      stats: {},
+      logExcerpt: '源或目标网盘处于暂停状态，本次执行跳过。恢复网盘后，下一个计划时刻会照常备份。',
+      handledAt: null
+    };
+    store.addRun(run);
+    const t = store.data.tasks.find((x) => x.id === task.id);
+    if (t) { t.lastRunAt = nowIso; t.lastStatus = 'skipped'; store.save(); }
+    console.log(`[runner] 任务「${task.name}」跳过：网盘「${pausedRemote}」已暂停`);
+    return run;
+  }
+
   running.add(task.id);
 
   const run = {
@@ -82,8 +110,9 @@ export async function runTask(task, trigger = 'manual') {
     const tt = store.data.tasks.find((x) => x.id === task.id);
     if (tt) { tt.lastStatus = 'failed'; store.save(); }
     running.delete(task.id);
+    store.bumpStats(run);
     log(`失败：${reasonZh}`);
-    sendBackupFailureMail(run).catch(() => {});
+    notifyBackupFailure(run).catch(() => {});
     console.log(`[runner] 任务「${task.name}」失败：${reasonZh}`);
     return run;
   };
@@ -181,6 +210,7 @@ export async function runTask(task, trigger = 'manual') {
     store.updateRun(run.id, run);
     const tt = store.data.tasks.find((x) => x.id === task.id);
     if (tt) { tt.lastStatus = 'success'; store.save(); }
+    store.bumpStats(run);
     running.delete(task.id);
     console.log(`[runner] 任务「${task.name}」完成：传输 ${run.stats.transferred ?? 0} 个文件`);
     return run;

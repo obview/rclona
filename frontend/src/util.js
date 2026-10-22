@@ -54,9 +54,32 @@ export function brandOf(remote) {
   return { color: '#5b67cf', label: (remote?.name || '?').slice(0, 1).toUpperCase(), name: remote?.type || '' };
 }
 
+export function fmtHM(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d)) return '—';
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 export const WEEKDAYS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 export function scheduleText(s) {
   if (!s) return '未设置';
-  if (s.type === 'weekly') return `每${WEEKDAYS[s.weekday] || ''} ${s.time}`;
-  return `每天 ${s.time}`;
+  switch (s.type) {
+    case 'weekly': {
+      const days = (s.weekdays && s.weekdays.length ? s.weekdays : [s.weekday ?? 1])
+        .map((d) => WEEKDAYS[d]).filter(Boolean).join('、');
+      return `每${days} ${s.time}`;
+    }
+    case 'monthly':
+      return `每月 ${s.dayOfMonth} 号 ${s.time}`;
+    case 'hours':
+      return `每 ${s.intervalHours} 小时`;
+    case 'days':
+      return `每 ${s.intervalDays} 天 ${s.time}`;
+    case 'cron':
+      return `cron：${s.cron}`;
+    default:
+      return `每天 ${s.time}`;
+  }
 }
