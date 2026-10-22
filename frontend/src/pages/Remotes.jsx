@@ -137,6 +137,14 @@ function ProviderForm({ providers, onDone, toast }) {
           Koofr 提示：密码处不要填登录密码，请到 Koofr 网站「设置 → 安全 → 应用密码」生成一个专用密码再填到这里。
         </div>
       )}
+      {type === 'local' && (
+        <div className="info-box" style={{ marginTop: 8 }}>
+          本地目录指的是面板所在机器（容器）自己的文件夹，一般不用填任何参数，直接添加即可。
+          <b>想备份这台服务器上的文件</b>：部署时按文档开启「服务器文件挂载」后，容器里会多出一个 <b>/host</b> 目录——
+          那就是服务器整个硬盘的只读视图；建备份任务选文件夹时从 /host 进去挑目录就行。
+          <HelpTip text={'怎么开启：在部署目录的 docker-compose.yml 里，把 volumes 下那行被注释掉的「/:/host:ro」取消注释，再执行 docker compose up -d 重建容器（README「备份服务器上的文件」一节有详细步骤）。\n放心：/host 是只读的，备份只会读文件，不会改动或删掉服务器上的任何东西。\n小提示：直接备份 /host 根目录时，proc、sys、dev、run 这些系统虚拟目录会被自动跳过（备了也没用）；更推荐按重要目录（比如 /host/etc、/host/home）分别建任务，恢复时更好找。'} />
+        </div>
+      )}
       {!def && <div className="loading-page"><span className="spin" /> 正在读取该类型的配置项…</div>}
       {def && (
         <>

@@ -33,6 +33,16 @@ function fmtWhen(iso) {
   } catch { return iso || ''; }
 }
 
+// 用户在设置里填的「面板访问地址」（如 https://panel.example.com）；填了通知才附直达链接，没填就不附
+function panelBase() {
+  const a = String(tg().panelAddress || '').trim().replace(/\/+$/, '');
+  return a || '';
+}
+function linkLine(path) {
+  const base = panelBase();
+  return base ? `\n直达链接：${base}${path}` : '';
+}
+
 export async function notifyBackupFailure(run) {
   try {
     await sendTelegram([
@@ -41,7 +51,7 @@ export async function notifyBackupFailure(run) {
       `失败阶段：${run.failedStageLabel || '未知阶段'}`,
       `原因：${run.reasonZh || '未知原因'}`,
       '',
-      '处理完后，别忘了在面板的「运行记录」里把这条标为「已处理」。'
+      '处理完后，别忘了在面板的「运行记录」里把这条标为「已处理」。' + linkLine(`/runs?focus=${run.id}`)
     ].join('\n'));
   } catch (e) {
     console.error('[notify] 备份失败通知发送失败：', e.message);
@@ -56,7 +66,7 @@ export async function notifyRemoteDown(remoteName, causeZh) {
       `原因：${causeZh}`,
       '',
       '常见处理：检查网盘服务是否正常、密钥/应用密码是否过期，然后在面板「网盘管理」里点「测试连接」。',
-      '恢复连接后会再发一条通知告诉你。'
+      '恢复连接后会再发一条通知告诉你。' + linkLine('/remotes')
     ].join('\n'));
   } catch (e) {
     console.error('[notify] 网盘失效通知发送失败：', e.message);
@@ -67,7 +77,7 @@ export async function notifyRemoteRecovered(remoteName) {
   try {
     await sendTelegram([
       `网盘已恢复：${remoteName}`,
-      `网盘「${remoteName}」连接已恢复正常，依赖它的备份可以照常进行。`
+      `网盘「${remoteName}」连接已恢复正常，依赖它的备份可以照常进行。` + linkLine('/remotes')
     ].join('\n'));
   } catch (e) {
     console.error('[notify] 网盘恢复通知发送失败：', e.message);

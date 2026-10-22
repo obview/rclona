@@ -19,7 +19,7 @@ const DEFAULT_STATS = () => ({
 const DEFAULTS = () => ({
   auth: null, // {user, salt, hash} —— 首次启动由环境变量或设置向导生成
   settings: {
-    telegram: { enabled: false, botToken: '', chatId: '' }
+    telegram: { enabled: false, botToken: '', chatId: '', panelAddress: '' }
   },
   tasks: [],
   runs: [],

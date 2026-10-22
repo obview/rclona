@@ -4,9 +4,10 @@ import { HelpTip, Icon } from '../components.jsx';
 
 const TOKEN_HELP = '机器人令牌是建机器人时 Telegram 给你的一串字符，长得像「123456789:AAEh...」。获取方法：打开 Telegram → 搜索 @BotFather → 发送 /newbot → 按提示给机器人起名字 → 它会回你一串令牌，复制到这里。令牌等于机器人的钥匙，别发给别人。';
 const CHATID_HELP = 'Chat ID 是「把通知发给谁」的编号，就是你自己的 Telegram 数字 ID。获取方法：先给你的机器人发任意一句话（比如「hi」，不发它没法主动找你），然后在 Telegram 里搜索 @userinfobot，它会直接回你的 Id（一串数字），抄到这里。也可以给机器人发完话后打开 https://api.telegram.org/bot<你的令牌>/getUpdates ，在返回内容里找 "chat":{"id": 后面的数字。';
+const ADDRESS_HELP = '填你平时打开这个面板用的地址，比如 https://panel.example.com，或者 http://192.168.1.10:8080。填了之后，备份失败的 Telegram 通知末尾会带一条链接，点一下就直接跳到出错的那条记录。\n留空也没关系：通知照样发，只是不带链接。\n填错了（比如端口写错、域名写错）唯一的影响就是链接点开打不开，通知本身不受影响，回来改对就行。';
 
 export default function Settings({ toast }) {
-  const [tg, setTg] = useState(null); // { enabled, chatId, botToken }
+  const [tg, setTg] = useState(null); // { enabled, chatId, panelAddress, botToken }
   const [tokenSet, setTokenSet] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -15,14 +16,14 @@ export default function Settings({ toast }) {
   useEffect(() => {
     api.get('/settings').then((d) => {
       const t = d.settings?.telegram || {};
-      setTg({ enabled: !!t.enabled, chatId: t.chatId || '', botToken: '' });
+      setTg({ enabled: !!t.enabled, chatId: t.chatId || '', panelAddress: t.panelAddress || '', botToken: '' });
       setTokenSet(!!d.botTokenSet);
-    }).catch(() => setTg({ enabled: false, chatId: '', botToken: '' }));
+    }).catch(() => setTg({ enabled: false, chatId: '', panelAddress: '', botToken: '' }));
   }, []);
 
   if (!tg) return <div className="loading-page"><span className="spin" /> 加载中…</div>;
   const set = (k, v) => setTg((x) => ({ ...x, [k]: v }));
-  const payload = () => ({ telegram: { enabled: tg.enabled, chatId: tg.chatId.trim(), botToken: tg.botToken.trim() } });
+  const payload = () => ({ telegram: { enabled: tg.enabled, chatId: tg.chatId.trim(), panelAddress: tg.panelAddress.trim(), botToken: tg.botToken.trim() } });
 
   async function save() {
     setSaving(true);
@@ -90,6 +91,12 @@ export default function Settings({ toast }) {
                 <label>Chat ID（发给谁） * <HelpTip text={CHATID_HELP} /></label>
                 <input className="input" value={tg.chatId} onChange={(e) => set('chatId', e.target.value)}
                   placeholder="你的 Telegram 数字 ID" />
+              </div>
+              <div className="field full">
+                <label>面板访问地址（可不填） <HelpTip text={ADDRESS_HELP} /></label>
+                <input className="input" value={tg.panelAddress} onChange={(e) => set('panelAddress', e.target.value)}
+                  placeholder="例如 https://panel.example.com 或 http://192.168.1.10:8080" />
+                <span className="hint">填了它，失败通知末尾会带一条链接，点一下直接跳到出错的那条记录；不填则只发文字通知。</span>
               </div>
             </div>
             <div className="info-box" style={{ marginTop: 14 }}>

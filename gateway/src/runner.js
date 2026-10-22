@@ -17,7 +17,8 @@ const running = new Set();
 export const isRunning = (taskId) => running.has(taskId);
 
 // 递归扫描源目录（BFS 分层 list），供「扫描比对」阶段与容量预检使用；条目数封顶防止超大盘拖垮
-async function scanSource(fs) {
+// skipTopDirs：源根目录下要整棵跳过的一级目录名集合（如备份 /host 时的虚拟目录），其余层级不跳
+async function scanSource(fs, skipTopDirs = null) {
   const MAX = 5000;
   let files = 0, bytes = 0, truncated = false;
   const queue = [''];
@@ -26,12 +27,29 @@ async function scanSource(fs) {
     const { list } = await rc.list(fs, dir);
     for (const it of list || []) {
       if (files + queue.length > MAX * 2) { truncated = true; continue; }
-      if (it.IsDir) queue.push(it.Path);
+      if (it.IsDir) {
+        if (dir === '' && skipTopDirs && skipTopDirs.has(it.Name)) continue;
+        queue.push(it.Path);
+      }
       else { files++; bytes += it.Size || 0; }
     }
     if (files > MAX) { truncated = true; break; }
   }
   return { files, bytes, truncated };
+}
+
+// #14：备份源就是宿主机根目录挂载 /host 时，proc/sys/dev/run 是系统虚拟目录——
+// 读了没用、内容时刻在变、还会让校验误报，同步/校验/扫描统一自动排除它们。
+// 只认「本地目录网盘 + 源路径恰好是 /host」这一种情形；/host/etc 这类子目录本身不含虚拟目录，无需排除。
+export const HOST_MOUNT = '/host';
+export const HOST_VIRTUAL_DIRS = ['proc', 'sys', 'dev', 'run'];
+export async function hostExcludesFor(task) {
+  const srcPath = String(task.srcPath || '').replace(/\/+$/, '');
+  if (srcPath !== HOST_MOUNT) return null;
+  let type = '';
+  try { type = (await rc.getRemote(task.srcRemote))?.type || ''; } catch { /* 查不到类型就不排除 */ }
+  if (type !== 'local') return null;
+  return HOST_VIRTUAL_DIRS.map((d) => `${d}/**`);
 }
 
 export async function runTask(task, trigger = 'manual') {
@@ -91,6 +109,10 @@ export async function runTask(task, trigger = 'manual') {
   const srcFs = fsSpec(task.srcRemote, task.srcPath);
   const dstFs = fsSpec(task.dstRemote, task.dstPath);
   log(`开始备份：${srcFs} → ${dstFs}（${trigger === 'schedule' ? '定时' : '手动'}触发）`);
+  // #14：源是宿主机根目录（/host）时，自动排除系统虚拟目录（扫描/同步/校验全程一致）
+  const excludeRules = await hostExcludesFor(task).catch(() => null);
+  const skipTopDirs = excludeRules ? new Set(HOST_VIRTUAL_DIRS) : null;
+  if (excludeRules) log(`源是服务器根目录（${HOST_MOUNT}），已自动排除系统虚拟目录：${HOST_VIRTUAL_DIRS.join('、')}`);
 
   const setStage = (i, status, durationMs) => {
     run.stages[i].status = status;
@@ -130,7 +152,7 @@ export async function runTask(task, trigger = 'manual') {
     t0 = Date.now();
     setStage(1, 'running');
     let scan;
-    try { scan = await scanSource(srcFs); }
+    try { scan = await scanSource(srcFs, skipTopDirs); }
     catch (e) { return fail(1, `扫描源目录失败：${e.message}`); }
     setStage(1, 'ok', Date.now() - t0);
     run.stats.checked = scan.files;
@@ -163,7 +185,7 @@ export async function runTask(task, trigger = 'manual') {
     t0 = Date.now();
     setStage(3, 'running');
     let jobid;
-    try { jobid = await rc.syncAsync(srcFs, dstFs); }
+    try { jobid = await rc.syncAsync(srcFs, dstFs, excludeRules); }
     catch (e) { return fail(3, e.message); }
     const deadline = Date.now() + cfg.runTimeoutMs;
     let job = null;
@@ -188,7 +210,7 @@ export async function runTask(task, trigger = 'manual') {
     t0 = Date.now();
     setStage(4, 'running');
     try {
-      const chk = await rc.check(srcFs, dstFs);
+      const chk = await rc.check(srcFs, dstFs, excludeRules);
       const diffs = [...(chk.differ || []), ...(chk.missingOnSrc || []), ...(chk.missingOnDst || [])];
       const errs = chk.error || [];
       if (errs.length) return fail(4, errs[0]);

@@ -247,6 +247,7 @@ export default function Tasks({ toast }) {
               <div style={{ color: 'var(--text-3)', fontSize: 12.5 }}>
                 {scheduleText(t.schedule)}
                 {t.enabled && t.nextRunAt && t.lastStatus !== 'running' && <> · 下次执行 {fmtTime(t.nextRunAt)}</>}
+                {t.enabled && !t.nextRunAt && t.lastStatus !== 'running' && <> · <span style={{ color: '#b97d1e' }}>近期无执行时间，请检查计划设置</span></>}
                 {t.lastStatus === 'success' && <> · 上次成功 {fmtAgo(t.lastRunAt)}</>}
                 {t.lastStatus === 'failed' && <> · <span style={{ color: 'var(--red-dark)' }}>上次失败 {fmtAgo(t.lastRunAt)}</span></>}
                 {t.lastStatus === 'skipped' && <> · 上次已跳过（网盘暂停中）</>}

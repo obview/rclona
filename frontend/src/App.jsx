@@ -22,6 +22,19 @@ function routeFromHash() {
   return NAV.some((n) => n.key === h) ? h : 'overview';
 }
 
+// #12：Telegram 通知里的直达链接形如 /runs?focus=记录ID（也兼容 #/runs?focus= 写法）
+function focusFromUrl() {
+  try {
+    const s = new URLSearchParams(location.search).get('focus');
+    if (s) return s;
+    const h = location.hash || '';
+    const qi = h.indexOf('?');
+    if (qi >= 0) return new URLSearchParams(h.slice(qi + 1)).get('focus') || '';
+  } catch { /* 地址异常就当没有 */ }
+  return '';
+}
+const DEEP_FOCUS = focusFromUrl();
+
 export function driveDotClass(d) {
   if (d.paused) return 'dot-paused';
   const s = d.health?.status;
@@ -33,11 +46,12 @@ export function driveDotClass(d) {
 
 export default function App() {
   const [me, setMe] = useState(null);
-  const [page, setPage] = useState(routeFromHash());
+  const [page, setPage] = useState(() => (DEEP_FOCUS ? 'runs' : routeFromHash()));
   const [drives, setDrives] = useState([]);
   const [toastMsg, setToastMsg] = useState(null);
   const [runToasts, setRunToasts] = useState([]); // #10 任务完成通知条
-  const [focusRun, setFocusRun] = useState({ id: '', n: 0 });
+  const [focusRun, setFocusRun] = useState({ id: DEEP_FOCUS, n: DEEP_FOCUS ? 1 : 0 });
+  const [navOpen, setNavOpen] = useState(false); // #11 手机抽屉侧栏开关
   const runStatusRef = useRef(null); // 运行记录 id -> 上次见到的状态（null=还没初始化）
 
   function toast(text, isErr = false) {
@@ -47,6 +61,7 @@ export default function App() {
   function nav(key) {
     location.hash = '/' + key;
     setPage(key);
+    setNavOpen(false); // 抽屉模式下点完导航自动收起
   }
   function gotoRun(runId) {
     setFocusRun((f) => ({ id: runId, n: f.n + 1 }));
@@ -61,6 +76,10 @@ export default function App() {
   }
   useEffect(() => {
     checkMe();
+    // 深链进来时把地址栏规整成站内 hash 路由（focus 已存进 state，刷新不会丢定位）
+    if (DEEP_FOCUS && (location.search || location.pathname !== '/')) {
+      history.replaceState(null, '', '/#/runs');
+    }
     const fn = () => setPage(routeFromHash());
     window.addEventListener('hashchange', fn);
     return () => window.removeEventListener('hashchange', fn);
@@ -109,10 +128,11 @@ export default function App() {
 
   return (
     <div className="layout">
-      <aside className="sidebar">
+      {navOpen && <div className="side-mask" onClick={() => setNavOpen(false)} />}
+      <aside className={`sidebar${navOpen ? ' open' : ''}`}>
         <div className="brand">
           <div className="brand-name">
-            <span className="logo-mark"><Icon name="cloud" size={18} /></span>rclona
+            <span className="logo-mark"><Icon name="cloud" size={18} /></span><span className="brand-text">rclona</span>
           </div>
           <div className="brand-sub">网盘备份面板</div>
         </div>
@@ -120,7 +140,7 @@ export default function App() {
         <nav>
           {NAV.map((n) => (
             <button key={n.key} className={`nav-item${page === n.key ? ' active' : ''}`} onClick={() => nav(n.key)}>
-              <Icon name={n.icon} size={17} />{n.label}
+              <Icon name={n.icon} size={17} /><span className="nav-label">{n.label}</span>
             </button>
           ))}
         </nav>
@@ -140,13 +160,16 @@ export default function App() {
           </button>
         </div>
         <div className="side-foot">
-          <button onClick={logout}><Icon name="logout" size={14} /> 退出登录</button>
-          <div style={{ marginTop: 8 }}>账号：{me.user}</div>
+          <button onClick={logout}><Icon name="logout" size={14} /><span className="nav-label">退出登录</span></button>
+          <div className="side-acct" style={{ marginTop: 8 }}>账号：{me.user}</div>
         </div>
       </aside>
 
       <div className="main">
         <div className="topbar">
+          <button className="nav-toggle" aria-label="打开菜单" onClick={() => setNavOpen(true)}>
+            <Icon name="menu" size={21} />
+          </button>
           <span className="crumb">rclona / {TITLES[page]}</span>
           <div className="spacer" />
           <div className="user-chip">

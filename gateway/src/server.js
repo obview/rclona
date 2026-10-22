@@ -293,7 +293,7 @@ export function createServer() {
         if (p === '/api/settings' && req.method === 'GET') {
           const t = store.data.settings.telegram || {};
           return sendJson(res, 200, {
-            settings: { telegram: { enabled: !!t.enabled, chatId: t.chatId || '' } },
+            settings: { telegram: { enabled: !!t.enabled, chatId: t.chatId || '', panelAddress: t.panelAddress || '' } },
             botTokenSet: !!t.botToken
           });
         }
@@ -301,11 +301,21 @@ export function createServer() {
           const b = await readBody(req);
           const prev = store.data.settings.telegram || {};
           const botToken = String(b.telegram?.botToken || '').trim();
+          // 面板访问地址：去掉末尾斜杠后保存；填了就必须是 http(s) 网址，格式不对整单拒绝（不保存任何改动）
+          const panelAddress = String(b.telegram?.panelAddress ?? prev.panelAddress ?? '').trim().replace(/\/+$/, '');
+          if (panelAddress) {
+            let u = null;
+            try { u = new URL(panelAddress); } catch { /* 下面统一报错 */ }
+            if (!u || (u.protocol !== 'http:' && u.protocol !== 'https:')) {
+              return sendJson(res, 400, { error: '面板访问地址格式不对，要像 https://panel.example.com 或 http://192.168.1.10:8080 这样填写（也可以留空不填）' });
+            }
+          }
           store.data.settings = {
             telegram: {
               enabled: !!b.telegram?.enabled,
               botToken: botToken || prev.botToken || '', // 留空 = 不改已保存的令牌
-              chatId: String(b.telegram?.chatId || '').trim()
+              chatId: String(b.telegram?.chatId || '').trim(),
+              panelAddress
             }
           };
           store.save();

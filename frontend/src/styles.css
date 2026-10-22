@@ -73,7 +73,7 @@ input, select, textarea { font-family: inherit; font-size: 14px; color: var(--te
 .drive-row .dname { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .drive-row .badge-num { font-size: 11px; color: #a7abd0; }
 .side-foot { margin-top: auto; padding: 14px 20px 18px; border-top: 1px solid rgba(255,255,255,.1); font-size: 12px; color: #9aa0cc; }
-.side-foot button { background: none; border: none; color: #cfd3ee; font-size: 13px; padding: 0; }
+.side-foot button { background: none; border: none; color: #cfd3ee; font-size: 13px; padding: 0; display: inline-flex; align-items: center; gap: 6px; }
 .side-foot button:hover { color: #fff; }
 
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -124,7 +124,7 @@ input, select, textarea { font-family: inherit; font-size: 14px; color: var(--te
 .word-bad { color: var(--red-dark); }
 .word-warn { color: #b97d1e; }
 .word-run { color: var(--indigo-600); }
-.big-status { width: 48px; height: 48px; border-radius: 50%; flex: 0 0 auto; display: flex; align-items: center; justify-content: center; }
+.big-status { width: 38px; height: 38px; border-radius: 50%; flex: 0 0 auto; display: flex; align-items: center; justify-content: center; }
 .big-status.ok { background: var(--green-bg); color: var(--green); }
 .big-status.fail { background: var(--red-bg); color: var(--red); }
 .big-status.handled { background: var(--green-bg); color: var(--green); }
@@ -163,15 +163,19 @@ input, select, textarea { font-family: inherit; font-size: 14px; color: var(--te
 .remote-line .r-type { color: var(--text-3); font-size: 12px; }
 .remote-line .r-time { margin-left: auto; color: var(--text-3); font-size: 12.5px; white-space: nowrap; }
 .remote-cause { margin: 2px 0 8px 20px; background: var(--red-bg); color: #8a3b3b; border-radius: 8px; padding: 8px 12px; font-size: 13px; }
-.run-row { display: flex; gap: 15px; align-items: flex-start; padding: 16px 20px; border-bottom: 1px solid #f0f2fa; }
+/* 运行记录紧凑行（#13）：默认两行——标题行（任务+状态+时间）+ 一行简要摘要，详情点开才展开 */
+.run-row { display: flex; gap: 12px; align-items: flex-start; padding: 11px 18px; border-bottom: 1px solid #f0f2fa; }
 .run-row:last-child { border-bottom: none; }
 .run-row .rr-main { flex: 1; min-width: 0; }
-.run-row .rr-title { font-weight: 600; font-size: 14.5px; }
+.run-row .rr-title { font-weight: 600; font-size: 14px; display: flex; align-items: baseline; gap: 5px; flex-wrap: wrap; }
 .run-row .rr-title .task-link { color: var(--text); }
-.run-row .rr-sum { color: var(--text-2); font-size: 13px; margin-top: 1px; }
+.run-row .rr-manual { color: var(--text-3); font-weight: 400; font-size: 12.5px; }
+.run-row .rr-time { margin-left: auto; color: var(--text-3); font-size: 12.5px; font-weight: 400; white-space: nowrap; }
+.run-row .rr-sum { color: var(--text-2); font-size: 13px; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .run-row .rr-sum.bad { color: var(--red-dark); }
-.run-row .rr-meta { color: var(--text-3); font-size: 12.5px; margin-top: 2px; }
-.run-row .rr-actions { display: flex; gap: 6px; flex: 0 0 auto; align-items: center; }
+.run-row .rr-detail { margin-top: 6px; }
+.run-row .rr-meta { color: var(--text-3); font-size: 12.5px; }
+.run-row .rr-actions { display: flex; gap: 6px; flex: 0 0 auto; align-items: center; padding-top: 1px; }
 
 /* ===== 阶段链（借鉴 GoodSync 的步骤化状态表达） ===== */
 .stage-chain { display: flex; flex-wrap: wrap; gap: 0; margin: 12px 0 4px; }
@@ -338,14 +342,63 @@ input, select, textarea { font-family: inherit; font-size: 14px; color: var(--te
 .run-row.flash { animation: flash-bg 2.4s ease-out; }
 @keyframes flash-bg { 0%, 55% { background: var(--indigo-50); } 100% { background: transparent; } }
 
-@media (max-width: 860px) {
-  .sidebar { display: none; }
+/* ===== 响应式（#11）：桌面 >1100 / 平板 761–1100 图标栏 / 手机 ≤760 抽屉 ===== */
+.nav-toggle {
+  display: none; background: none; border: none; color: var(--text-2);
+  padding: 6px; margin-left: -6px; border-radius: 8px; align-items: center; justify-content: center;
+}
+.nav-toggle:hover { background: var(--grey-bg); color: var(--text); }
+.side-mask { position: fixed; inset: 0; background: rgba(31, 34, 66, .45); z-index: 74; }
+.sidebar { transition: transform .26s ease; }
+
+/* 平板：侧栏收窄为仅图标（文字标签隐藏，靠图标+悬停 title 辨认） */
+@media (max-width: 1100px) {
+  :root { --sidebar-w: 72px; }
+  .brand { padding: 16px 0 4px; }
+  .brand-name { justify-content: center; }
+  .brand-text, .brand-sub, .side-section, .nav-label, .side-acct,
+  .drive-row .dname, .drive-row .badge-num { display: none; }
+  .nav-item { justify-content: center; padding: 10px 0; margin: 2px 12px; width: calc(100% - 24px); }
+  .drive-row { justify-content: center; padding: 8px 0; margin: 1px 12px; width: calc(100% - 24px); }
+  .side-foot { padding: 14px 0 18px; text-align: center; }
+  .page { padding: 22px 20px 40px; }
+}
+
+/* 手机：侧栏变抽屉（左上角汉堡打开，遮罩/点导航关闭），内容全面单列紧凑化 */
+@media (max-width: 760px) {
+  :root { --sidebar-w: 248px; }
+  .sidebar {
+    position: fixed; top: 0; left: 0; height: 100dvh; width: 248px; flex: none;
+    z-index: 75; transform: translateX(-106%); box-shadow: 0 0 60px rgba(20, 22, 50, .35);
+  }
+  .sidebar.open { transform: none; }
+  /* 抽屉里恢复完整文字形态（覆盖平板图标栏的隐藏规则） */
+  .brand { padding: 20px 20px 6px; }
+  .brand-name { justify-content: flex-start; }
+  .brand-text, .nav-label, .drive-row .dname, .drive-row .badge-num { display: inline; }
+  .brand-sub, .side-section, .side-acct { display: block; }
+  .drive-row .dname { display: block; }
+  .nav-item { justify-content: flex-start; padding: 8px 12px; margin: 2px 10px; width: calc(100% - 20px); }
+  .drive-row { justify-content: flex-start; padding: 6px 12px; margin: 1px 10px; width: calc(100% - 20px); }
+  .side-foot { padding: 14px 20px 18px; text-align: left; }
+  .nav-toggle { display: inline-flex; }
+  .topbar { padding: 0 14px; }
+  .page { padding: 18px 14px 40px; }
+  .page-head { flex-wrap: wrap; }
   .pair-flow { flex-direction: column; align-items: center; }
   .pair-mid { transform: rotate(90deg); min-height: 70px; }
   .form-grid { grid-template-columns: 1fr; }
-  .page { padding: 20px 16px 40px; }
   .dash-grid { grid-template-columns: 1fr; }
   .sys-grid { grid-template-columns: 1fr; }
-  .run-toasts { left: 16px; right: 16px; align-items: stretch; }
+  .task-row { flex-wrap: wrap; padding: 14px 16px; }
+  .run-row { padding: 11px 14px; gap: 10px; }
+  .problem-row { flex-wrap: wrap; }
+  .alert-card { flex-wrap: wrap; }
+  .modal-mask { padding: 3vh 10px 20px; }
+  .login-card { padding: 28px 22px 24px; }
+  .kv-row .k { flex-basis: 88px; }
+  .help-bubble { max-width: 78vw; }
+  .run-toasts { left: 14px; right: 14px; align-items: stretch; }
   .run-toast { max-width: none; }
+  .log-box { font-size: 11px; }
 }

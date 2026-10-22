@@ -80,8 +80,16 @@ export const rc = {
   // 创建目录（连同上级目录一并创建），备份执行时用来自动补建不存在的目标目录
   mkdir: (fs, remote = '') => call('operations/mkdir', { fs, remote }, 45000),
   about: (fs) => call('operations/about', { fs }, 30000),
-  check: (srcFs, dstFs) => call('operations/check', { srcFs, dstFs }, 15 * 60 * 1000),
-  syncAsync: async (srcFs, dstFs) => (await call('sync/sync', { srcFs, dstFs, _async: true })).jobid,
+  // excludeRules：相对源根目录的排除规则（如 ['proc/**']），经 rc 的 _filter 传入
+  // （rclone v1.75 实测：_filter 的字段名是 ExcludeRule，不是 Exclude）
+  check: (srcFs, dstFs, excludeRules) => call('operations/check', {
+    srcFs, dstFs,
+    ...(excludeRules?.length ? { _filter: { ExcludeRule: excludeRules } } : {})
+  }, 15 * 60 * 1000),
+  syncAsync: async (srcFs, dstFs, excludeRules) => (await call('sync/sync', {
+    srcFs, dstFs, _async: true,
+    ...(excludeRules?.length ? { _filter: { ExcludeRule: excludeRules } } : {})
+  })).jobid,
   jobStatus: (jobid) => call('job/status', { jobid }, 15000),
   stats: (group) => call('core/stats', { group }, 15000)
 };

@@ -422,6 +422,98 @@ async function main() {
     ok(!!settingsAfter.data.settings?.telegram && !('smtp' in settingsAfter.data.settings) && settingsAfter.data.botTokenSet === false,
       '旧邮箱/SMTP 设置被丢弃、改为 Telegram 结构（令牌未设置）');
 
+    console.log('== 13. 第二批：面板地址与通知直达链接 / 紧凑记录字段 / /host 自动排除 ==');
+    // 13a 面板地址：保存时去掉末尾斜杠；非法地址整单拒绝且不改动原设置
+    const putAddr = await api('PUT', '/api/settings', {
+      telegram: { enabled: true, botToken: 'TESTTOKEN123', chatId: '424242', panelAddress: 'http://panel.example.com:8080/' }
+    });
+    ok(putAddr.status === 200, '带面板地址的设置可保存');
+    const getAddr = await api('GET', '/api/settings');
+    ok(getAddr.data.settings?.telegram?.panelAddress === 'http://panel.example.com:8080',
+      '面板地址回读正确（末尾斜杠已去掉）', getAddr.data.settings?.telegram?.panelAddress || '(空)');
+    const putBadAddr = await api('PUT', '/api/settings', {
+      telegram: { enabled: true, botToken: 'TESTTOKEN123', chatId: '424242', panelAddress: '这不是网址' }
+    });
+    ok(putBadAddr.status === 400 && /面板访问地址/.test(putBadAddr.data?.error || ''),
+      '非法面板地址被拒绝（400）', putBadAddr.data?.error || '');
+    const getAddr2 = await api('GET', '/api/settings');
+    ok(getAddr2.data.settings?.telegram?.panelAddress === 'http://panel.example.com:8080',
+      '非法地址被拒后，原设置未被改动');
+
+    // 13b 失败通知末尾带记录直达链接；记录自带紧凑展示字段
+    const linkTask = await api('POST', '/api/tasks', {
+      name: '链接通知', srcRemote: 'tsrc', srcPath: '/no/such/dir2',
+      dstRemote: 'tdst', dstPath: dstDir, schedule: { type: 'daily', time: '04:00' }
+    });
+    await api('POST', `/api/tasks/${linkTask.data.task.id}/run`);
+    const linkRun = await waitFor(async () => {
+      const d = await api('GET', `/api/runs?taskId=${linkTask.data.task.id}`);
+      const r = d.data.runs?.[0];
+      return r && r.status === 'failed' ? r : null;
+    }, 60000);
+    ok(!!linkRun, '链接通知任务按预期失败（源不存在）');
+    ok(typeof linkRun.reasonZh === 'string' && linkRun.reasonZh.length > 0
+      && !!linkRun.failedStageLabel && Array.isArray(linkRun.stages) && !!linkRun.startedAt,
+      '记录自带紧凑行展示所需字段（状态/任务名/时间/简要原因/失败阶段/五阶段）');
+    const tgLink = await waitFor(async () =>
+      tgMessages.find((m) => m.text.includes('链接通知')
+        && m.text.includes(`http://panel.example.com:8080/runs?focus=${linkRun.id}`)) || null, 10000).catch(() => null);
+    ok(!!tgLink, '失败通知末尾带正确的记录直达链接',
+      tgLink ? '' : `已收到 ${tgMessages.length} 条，未找到带链接的那条`);
+
+    // 13c 清空面板地址：通知照常发送，但不再带链接
+    const putNoAddr = await api('PUT', '/api/settings', {
+      telegram: { enabled: true, chatId: '424242', panelAddress: '' }
+    });
+    ok(putNoAddr.status === 200, '清空面板地址可保存（令牌留空=不改，靠它继续发通知）');
+    const tgBefore = tgMessages.length;
+    const noLinkTask = await api('POST', '/api/tasks', {
+      name: '无链接通知', srcRemote: 'tsrc', srcPath: '/no/such/dir3',
+      dstRemote: 'tdst', dstPath: dstDir, schedule: { type: 'daily', time: '04:00' }
+    });
+    await api('POST', `/api/tasks/${noLinkTask.data.task.id}/run`);
+    const tgNoLink = await waitFor(async () =>
+      tgMessages.slice(tgBefore).find((m) => m.text.includes('无链接通知') && m.text.includes('备份失败')) || null, 15000).catch(() => null);
+    ok(!!tgNoLink && !tgNoLink.text.includes('focus='),
+      '未填面板地址时通知照常发送且不带链接');
+
+    // 13d 备份源 = /host 根目录：proc/sys/dev/run 自动排除（同步与校验一致），真实文件正常同步
+    const HOST = '/host';
+    if (!fs.existsSync(HOST)) {
+      for (const d of ['proc', 'sys', 'dev', 'run', 'etc', 'home']) fs.mkdirSync(path.join(HOST, d), { recursive: true });
+      for (const d of ['proc', 'sys', 'dev', 'run']) fs.writeFileSync(path.join(HOST, d, 'junk.txt'), 'virtual junk');
+      fs.writeFileSync(path.join(HOST, 'etc', 'hostname.txt'), 'my-vps');
+      fs.writeFileSync(path.join(HOST, 'home', 'note.txt'), 'important note');
+      try {
+        const thost = await api('POST', '/api/remotes', { name: 'thost', type: 'local', config: {} });
+        ok(thost.status === 200, '宿主机本地网盘（local）创建成功');
+        const hostDst = path.join(T, 'hostbak');
+        const hostTask = await api('POST', '/api/tasks', {
+          name: '服务器根目录备份', srcRemote: 'thost', srcPath: HOST,
+          dstRemote: 'tdst', dstPath: hostDst, schedule: { type: 'daily', time: '04:00' }
+        });
+        await api('POST', `/api/tasks/${hostTask.data.task.id}/run`);
+        const hostRun = await waitFor(async () => {
+          const d = await api('GET', `/api/runs?taskId=${hostTask.data.task.id}`);
+          const r = d.data.runs?.[0];
+          return r && r.status !== 'running' ? r : null;
+        }, 60000);
+        ok(hostRun.status === 'success', '/host 备份成功（校验阶段也通过：排除在同步与校验两侧一致）',
+          `状态=${hostRun.status} ${hostRun.reasonZh || ''}`);
+        ok(fs.readFileSync(path.join(hostDst, 'etc', 'hostname.txt'), 'utf8') === 'my-vps'
+          && fs.readFileSync(path.join(hostDst, 'home', 'note.txt'), 'utf8') === 'important note',
+          '/host 下的真实文件已正确同步');
+        ok(!fs.existsSync(path.join(hostDst, 'proc')) && !fs.existsSync(path.join(hostDst, 'sys'))
+          && !fs.existsSync(path.join(hostDst, 'dev')) && !fs.existsSync(path.join(hostDst, 'run')),
+          'proc/sys/dev/run 虚拟目录被自动排除（未出现在目标）');
+        ok(/已自动排除/.test(hostRun.logExcerpt || ''), '运行日志里注明了自动排除');
+      } finally {
+        fs.rmSync(HOST, { recursive: true, force: true });
+      }
+    } else {
+      ok(true, '（跳过 /host 排除用例：本机已存在 /host，不动它）');
+    }
+
     console.log(failures === 0 ? '\n全部自测通过 ✅' : `\n有 ${failures} 项未通过 ❌`);
   } finally {
     gw.kill('SIGTERM');

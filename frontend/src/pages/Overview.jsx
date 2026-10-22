@@ -115,7 +115,11 @@ export default function Overview({ nav, gotoRun }) {
             </div>
             <div className="kv-row">
               <span className="k">下一次计划备份</span>
-              <span className="v">{nextTask ? <>「{nextTask.name}」· {fmtTime(nextTask.nextRunAt)}</> : '暂无已启用的任务'}</span>
+              <span className="v">{nextTask
+                ? <>「{nextTask.name}」· {fmtTime(nextTask.nextRunAt)}</>
+                : tasks.some((t) => t.enabled)
+                  ? <span style={{ color: '#b97d1e' }}>近期无执行时间，请检查计划设置</span>
+                  : '暂无已启用的任务'}</span>
             </div>
             <div className="kv-row">
               <span className="k">正在进行的任务</span>
@@ -178,6 +182,7 @@ export default function Overview({ nav, gotoRun }) {
                 <div className="mt-sub">
                   {scheduleText(t.schedule)}
                   {t.enabled && t.nextRunAt ? ` · 下次 ${fmtTime(t.nextRunAt)}` : ''}
+                  {t.enabled && !t.nextRunAt && t.lastStatus !== 'running' ? ' · 近期无执行时间，请检查计划设置' : ''}
                   {t.lastStatus === 'running' ? ' · 正在执行…' : ''}
                 </div>
               </div>

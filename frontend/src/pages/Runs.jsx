@@ -14,6 +14,8 @@ export function runSummary(run) {
   return run.reasonZh || '备份失败';
 }
 
+// 紧凑行（#13）：默认只占两行——任务+状态+时间、一行简要摘要；
+// 五阶段链、详细原因、日志、「标记已处理」全部收进「详情」展开区，点开才看
 export function RunRow({ run, onHandled, showTask = true, highlighted = false }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -31,32 +33,37 @@ export function RunRow({ run, onHandled, showTask = true, highlighted = false })
         <div className="rr-title">
           {showTask && <span className="task-link">{run.taskName} · </span>}
           <RunStatusWord run={run} />
-          {run.trigger === 'manual' && <span style={{ color: 'var(--text-3)', fontWeight: 400, fontSize: 12.5 }}>（手动执行）</span>}
+          {run.trigger === 'manual' && <span className="rr-manual">（手动执行）</span>}
+          <span className="rr-time">{fmtTimeSec(run.startedAt)}</span>
         </div>
-        <div className={`rr-sum${run.status === 'failed' && !run.handledAt ? ' bad' : ''}`}>{runSummary(run)}</div>
-        <div className="rr-meta">
-          {fmtTimeSec(run.startedAt)}
-          {run.finishedAt && <> · 用时 {fmtDuration(new Date(run.finishedAt) - new Date(run.startedAt))}</>}
-          {s.checked != null && run.status === 'success' && <> · 比对 {s.checked} 个文件</>}
-          {run.handledAt && <> · 已于 {fmtTimeSec(run.handledAt)} 标记处理</>}
-        </div>
+        <div className={`rr-sum${run.status === 'failed' && !run.handledAt ? ' bad' : ''}`} title={runSummary(run)}>{runSummary(run)}</div>
         {open && (
-          <div>
+          <div className="rr-detail">
+            <div className="rr-meta">
+              开始 {fmtTimeSec(run.startedAt)}
+              {run.finishedAt && <> · 用时 {fmtDuration(new Date(run.finishedAt) - new Date(run.startedAt))}</>}
+              {s.checked != null && run.status === 'success' && <> · 比对 {s.checked} 个文件</>}
+              {run.handledAt && <> · 已于 {fmtTimeSec(run.handledAt)} 标记为已处理</>}
+            </div>
             <StageChain stages={run.stages} />
             {run.status === 'failed' && run.reasonZh && (
-              <div style={{ color: 'var(--red-dark)', fontSize: 13.5, marginTop: 6 }}>失败原因：{run.reasonZh}</div>
+              <div style={{ color: 'var(--red-dark)', fontSize: 13.5, marginTop: 6 }}>
+                详细原因：{run.failedStageLabel ? `卡在「${run.failedStageLabel}」阶段——` : ''}{run.reasonZh}
+              </div>
             )}
             {run.logExcerpt && <div className="log-box">{run.logExcerpt}</div>}
+            {run.status === 'failed' && !run.handledAt && (
+              <div style={{ marginTop: 10 }}>
+                <button className="btn btn-ghost btn-sm" disabled={busy} onClick={handle}>
+                  <Icon name="check" size={14} /> 标记已处理
+                </button>
+              </div>
+            )}
           </div>
         )}
       </div>
       <div className="rr-actions">
         <button className="btn-link" onClick={() => setOpen(!open)}>{open ? '收起' : '详情'}</button>
-        {run.status === 'failed' && !run.handledAt && (
-          <button className="btn btn-ghost btn-sm" disabled={busy} onClick={handle}>
-            <Icon name="check" size={14} /> 标记已处理
-          </button>
-        )}
       </div>
     </div>
   );
