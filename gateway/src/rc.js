@@ -73,6 +73,8 @@ export const rc = {
   listRemotes: async () => (await call('config/listremotes')).remotes || [],
   getRemote: (name) => call('config/get', { name }),
   createRemote: (name, type, parameters) => call('config/create', { name, type, parameters }),
+  // 只更新给出的字段，未提及的字段（含已存的密码）原样保留（v1.75.2 实测）
+  updateRemote: (name, parameters) => call('config/update', { name, parameters }),
   deleteRemote: (name) => call('config/delete', { name }),
   providers: () => call('config/providers'),
   // 列一层目录（真实读取，可用于连通性测试）

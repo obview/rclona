@@ -4,13 +4,24 @@ import { BrandBadge, HelpTip, Icon, Modal } from '../components.jsx';
 import { fieldHelp, s3ProviderLabel, typeLabel } from '../fieldhelp.js';
 import { fmtAgo } from '../util.js';
 
-function ProviderForm({ providers, onDone, toast }) {
-  const [type, setType] = useState('s3');
-  const [name, setName] = useState('');
+function ProviderForm({ providers, onDone, toast, editing }) {
+  const [type, setType] = useState(editing?.type || 's3');
+  const [name, setName] = useState(editing?.name || '');
   const [values, setValues] = useState({});
+  const [secrets, setSecrets] = useState([]);
+  const [loaded, setLoaded] = useState(!editing);
   const [showAdv, setShowAdv] = useState(false);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
+
+  // 编辑：先拉当前配置回填（密码类字段服务端不下发明文，只告诉我们哪些已保存）
+  useEffect(() => {
+    if (!editing) return;
+    api.get(`/remotes/${encodeURIComponent(editing.name)}/config`)
+      .then((d) => { setType(d.type || editing.type); setValues(d.config || {}); setSecrets(d.secrets || []); setLoaded(true); })
+      .catch((e) => { setErr(e.message); setLoaded(true); });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const def = providers?.[type];
   const options = useMemo(() => {
@@ -63,7 +74,9 @@ function ProviderForm({ providers, onDone, toast }) {
       );
     }
     if (o.type === 'password') {
-      return <input className="input" type="password" autoComplete="new-password" value={v} onChange={(e) => set(e.target.value)} placeholder="填写后将由 rclone 加密保存" />;
+      const saved = editing && secrets.includes(o.name);
+      return <input className="input" type="password" autoComplete="new-password" value={v} onChange={(e) => set(e.target.value)}
+        placeholder={saved ? '已保存，留空表示不改' : '填写后将由 rclone 加密保存'} />;
     }
     if (o.type === 'int' || o.type === 'size' || o.type === 'duration') {
       return <input className="input" type="text" inputMode="numeric" value={v} onChange={(e) => set(e.target.value)} placeholder={o.default || ''} />;
@@ -90,6 +103,17 @@ function ProviderForm({ providers, onDone, toast }) {
 
   async function submit() {
     setErr('');
+    if (editing) {
+      setSaving(true);
+      try {
+        const d = await api.put(`/remotes/${encodeURIComponent(editing.name)}/config`, { config: values });
+        if (d.test?.ok) toast(`网盘「${editing.name}」已保存，重测连接正常${d.test.remark ? `（${d.test.remark}）` : ''}`);
+        else toast(`网盘「${editing.name}」已保存，但重测未通过：${d.test?.cause || ''}`, true);
+        onDone();
+      } catch (e) { setErr(e.message); }
+      setSaving(false);
+      return;
+    }
     if (!name.trim()) { setErr('给这个网盘起个名字'); return; }
     if (!/^[A-Za-z0-9_.\-]+$/.test(name.trim())) { setErr('名字只能用英文字母、数字、下划线和横线'); return; }
     setSaving(true);
@@ -107,17 +131,25 @@ function ProviderForm({ providers, onDone, toast }) {
       <div className="form-grid" style={{ marginBottom: 6 }}>
         <div className="field">
           <label>网盘类型</label>
-          <select className="select" value={type} onChange={(e) => { setType(e.target.value); setValues({}); }}>
+          <select className="select" value={type} disabled={!!editing} onChange={(e) => { setType(e.target.value); setValues({}); }}>
             {providers && Object.keys(providers).map((t) => (
               <option key={t} value={t}>{typeLabel(t)}</option>
             ))}
           </select>
+          {editing && <div className="hint" style={{ marginTop: 4 }}>类型不能改（要换类型请删掉重加）</div>}
         </div>
         <div className="field">
           <label>显示名称 *</label>
-          <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder="例如：我的 R2、Koofr 备份盘" />
+          <input className="input" value={name} disabled={!!editing} onChange={(e) => setName(e.target.value)} placeholder="例如：我的 R2、Koofr 备份盘" />
+          {editing && <div className="hint" style={{ marginTop: 4 }}>名称不能改（改名会让已有的备份任务找不到它）</div>}
         </div>
       </div>
+      {editing && !loaded && <div className="loading-page"><span className="spin" /> 正在读取当前配置…</div>}
+      {editing && loaded && secrets.length > 0 && (
+        <div className="info-box" style={{ marginTop: 8 }}>
+          密码 / 密钥类字段（{secrets.join('、')}）已经保存着了，出于安全不显示原文：<b>留空表示不改</b>，要换就直接填新值。
+        </div>
+      )}
       {type === 's3' && (
         <div style={{ display: 'flex', gap: 8, margin: '8px 0 4px', flexWrap: 'wrap' }}>
           <span style={{ fontSize: 13, color: 'var(--text-2)', alignSelf: 'center' }}>快捷预设：</span>
@@ -146,7 +178,7 @@ function ProviderForm({ providers, onDone, toast }) {
         </div>
       )}
       {!def && <div className="loading-page"><span className="spin" /> 正在读取该类型的配置项…</div>}
-      {def && (
+      {def && loaded && (
         <>
           <div className="form-grid" style={{ marginTop: 10 }}>{renderOptions(basic)}</div>
           {adv.length > 0 && (
@@ -160,7 +192,9 @@ function ProviderForm({ providers, onDone, toast }) {
         </>
       )}
       <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: 18 }}>
-        <button className="btn btn-primary" disabled={saving} onClick={submit}>{saving ? '添加中…' : '添加网盘'}</button>
+        <button className="btn btn-primary" disabled={saving || !loaded} onClick={submit}>
+          {saving ? '保存中…' : editing ? '保存修改' : '添加网盘'}
+        </button>
       </div>
     </div>
   );
@@ -170,6 +204,7 @@ export default function Remotes({ toast, nav }) {
   const [remotes, setRemotes] = useState(null);
   const [providers, setProviders] = useState(null);
   const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState(null);
   const [testing, setTesting] = useState('');
 
   async function load() {
@@ -233,6 +268,9 @@ export default function Remotes({ toast, nav }) {
                 类型：{typeLabel(r.type)}
                 {r.health?.lastCheckAt && <> · 上次检查 {fmtAgo(r.health.lastCheckAt)}</>}
               </div>
+              {r.health?.remark && (
+                <div style={{ color: 'var(--text-3)', fontSize: 12.5 }}>{r.health.remark}</div>
+              )}
             </div>
             {r.paused && <span className="pill pill-off">已暂停</span>}
             {!r.paused && r.health?.status === 'down' && <span className="pill pill-fail">✕ 连接失效</span>}
@@ -240,6 +278,9 @@ export default function Remotes({ toast, nav }) {
             {!r.paused && r.health?.status === 'ok' && <span className="pill pill-ok">✓ 连接正常</span>}
             <button className="btn btn-ghost btn-sm" disabled={testing === r.name} onClick={() => test(r)}>
               <Icon name="refresh" size={13} /> {testing === r.name ? '测试中…' : '测试连接'}
+            </button>
+            <button className="btn btn-ghost btn-sm" onClick={() => setEditing(r)}>
+              <Icon name="edit" size={13} /> 编辑
             </button>
             <button className="btn btn-ghost btn-sm" onClick={() => togglePause(r)}>
               <Icon name={r.paused ? 'play' : 'pause'} size={13} /> {r.paused ? '恢复' : '暂停'}
@@ -253,6 +294,11 @@ export default function Remotes({ toast, nav }) {
       {adding && (
         <Modal title="添加网盘" sub="配置项由 rclone 官方定义，密码类字段会被加密保存" wide onClose={() => setAdding(false)}>
           <ProviderForm providers={providers} toast={toast} onDone={() => { setAdding(false); load(); }} />
+        </Modal>
+      )}
+      {editing && (
+        <Modal title={`编辑网盘「${editing.name}」`} sub="核对或修改配置；密码类字段留空表示不改，保存后会自动重测连接" wide onClose={() => setEditing(null)}>
+          <ProviderForm providers={providers} toast={toast} editing={editing} onDone={() => { setEditing(null); load(); }} />
         </Modal>
       )}
     </div>

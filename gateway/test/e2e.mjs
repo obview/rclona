@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
+import { classifyError } from '../src/classify.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const T = '/tmp/rclona-e2e';
@@ -77,6 +78,27 @@ function startFakeTelegram(port) {
   return new Promise((r) => srv.listen(port, '127.0.0.1', () => r(srv)));
 }
 const tgHas = (a, b = '') => tgMessages.some((m) => m.text.includes(a) && m.text.includes(b));
+
+// 假 S3：mode=denied 时 ListBuckets 回 403 AccessDenied（单桶令牌的真实行为），
+// 但指定桶名的 ListObjects 正常；mode=badkey 时一律回 403 InvalidAccessKeyId（真凭证错误）
+function startFakeS3(port, mode) {
+  const srv = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://x');
+    const errXml = (code, msg) => `<?xml version="1.0" encoding="UTF-8"?><Error><Code>${code}</Code><Message>${msg}</Message><RequestId>fake</RequestId></Error>`;
+    if (mode === 'badkey') {
+      res.writeHead(403, { 'Content-Type': 'application/xml' });
+      return res.end(errXml('InvalidAccessKeyId', 'The AWS Access Key Id you provided does not exist in our records.'));
+    }
+    if (u.pathname === '/' && req.method === 'GET' && !u.searchParams.has('list-type')) {
+      res.writeHead(403, { 'Content-Type': 'application/xml' });
+      return res.end(errXml('AccessDenied', 'Access Denied'));
+    }
+    // 列具体桶：返回空列表（桶里没文件，但桶本身可达）
+    res.writeHead(200, { 'Content-Type': 'application/xml' });
+    res.end(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>webdav</Name><Prefix></Prefix><KeyCount>0</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>false</IsTruncated></ListBucketResult>`);
+  });
+  return new Promise((r) => srv.listen(port, '127.0.0.1', () => r(srv)));
+}
 
 async function main() {
   fs.rmSync(T, { recursive: true, force: true });
@@ -513,6 +535,89 @@ async function main() {
     } else {
       ok(true, '（跳过 /host 排除用例：本机已存在 /host，不动它）');
     }
+
+    console.log('== 14. 热修 #15：网盘可编辑 / 分类器分清凭证与权限 / S3 单桶令牌不误判 ==');
+    // 14a 分类器：用真实错误文本样本断言归类（AccessDenied 绝不能再归「凭证错误」）
+    ok(classifyError('operation error S3: ListBuckets, StatusCode: 403, api error InvalidAccessKeyId: The AWS Access Key Id you provided does not exist').kind === 'auth',
+      'InvalidAccessKeyId → 真凭证错误');
+    ok(classifyError('operation error S3: PutObject, api error SignatureDoesNotMatch: The request signature we calculated does not match').kind === 'auth',
+      'SignatureDoesNotMatch → 真凭证错误');
+    ok(classifyError('api error InvalidClientTokenId: The security token included in the request is invalid').kind === 'auth',
+      'InvalidClientTokenId → 真凭证错误');
+    const deniedCls = classifyError('Failed to ls: operation error S3: ListBuckets, https response error StatusCode: 403, api error AccessDenied: Access Denied');
+    ok(deniedCls.kind === 'permission' && !/凭证不正确/.test(deniedCls.reasonZh),
+      'AccessDenied(403) → 权限不足（与凭证错误分开）', deniedCls.reasonZh);
+    ok(classifyError('401 Unauthorized').kind === 'auth', '401 → 凭证错误');
+
+    // 14b 编辑网盘：普通字段可改、密钥留空不被冲掉、密钥不外泄
+    const EDITDAV = 18788;
+    const editDavSrv = await startFakeDav(EDITDAV);
+    const confPath = path.join(T, 'data', 'rclone.conf');
+    const passLineOf = (sec) => {
+      const txt = fs.readFileSync(confPath, 'utf8');
+      const m = txt.match(new RegExp(`\\[${sec}\\][\\s\\S]*?^pass = (.+)$`, 'm'));
+      return m ? m[1].trim() : '';
+    };
+    try {
+      const mk = await api('POST', '/api/remotes', {
+        name: 'editdav', type: 'webdav',
+        config: { url: `http://127.0.0.1:${EDITDAV}/dav`, user: 'u1', pass: 'pw-one' }
+      });
+      ok(mk.status === 200 && mk.data.test?.ok === true, '待编辑网盘创建并首测通过');
+      const passBefore = passLineOf('editdav');
+      ok(!!passBefore, '前置：conf 里已有加密保存的密码');
+      const getCfg = await api('GET', '/api/remotes/editdav/config');
+      ok(getCfg.status === 200 && getCfg.data.config?.user === 'u1'
+        && !('pass' in (getCfg.data.config || {})) && (getCfg.data.secrets || []).includes('pass'),
+        '读取配置：普通字段回填、密码字段不下发');
+      ok(!JSON.stringify(getCfg.data).includes(passBefore), '读取配置的响应里不含已存密码（连加密串也不给）');
+      const putKeep = await api('PUT', '/api/remotes/editdav/config', {
+        config: { url: `http://127.0.0.1:${EDITDAV}/dav`, user: 'u2', pass: '' }
+      });
+      ok(putKeep.status === 200 && putKeep.data.test?.ok === true, '编辑保存（密码留空）成功且重测通过',
+        putKeep.status !== 200 ? `status=${putKeep.status} ${JSON.stringify(putKeep.data)}` : '');
+      ok(passLineOf('editdav') === passBefore, '密码留空保存后，已存密码未被冲掉（conf 里原样保留）');
+      const getCfg2 = await api('GET', '/api/remotes/editdav/config');
+      ok(getCfg2.data.config?.user === 'u2', '普通字段修改已生效（user 改为 u2）');
+      const putNew = await api('PUT', '/api/remotes/editdav/config', { config: { pass: 'pw-two' } });
+      ok(putNew.status === 200 && passLineOf('editdav') !== passBefore && passLineOf('editdav') !== '',
+        '填了新密码保存后，已存密码被更新',
+        putNew.status !== 200 ? `status=${putNew.status} ${JSON.stringify(putNew.data)}` : '');
+      const put404 = await api('PUT', '/api/remotes/no-such-remote/config', { config: { user: 'x' } });
+      ok(put404.status === 404, '编辑不存在的网盘返回 404');
+      const get404 = await api('GET', '/api/remotes/no-such-remote/config');
+      ok(get404.status === 404, '读取不存在网盘的配置返回 404');
+    } finally { editDavSrv.close(); }
+
+    // 14c 假 S3 单桶令牌：根 ListBuckets 被 403 AccessDenied → 判已连通 + remark，浏览根目录给 permission 码、按桶名可列
+    const s3DeniedSrv = await startFakeS3(18791, 'denied');
+    const s3BadSrv = await startFakeS3(18792, 'badkey');
+    try {
+      const mkS3 = await api('POST', '/api/remotes', {
+        name: 'fakes3', type: 's3',
+        config: { provider: 'Other', access_key_id: 'ak-test', secret_access_key: 'sk-test', region: 'us-east-1', endpoint: 'http://127.0.0.1:18791' }
+      });
+      ok(mkS3.status === 200 && mkS3.data.test?.ok === true && /单桶/.test(mkS3.data.test?.remark || ''),
+        '单桶令牌创建首测判「已连通」并带单桶说明', JSON.stringify(mkS3.data.test || {}));
+      const s3Remote = (await api('GET', '/api/remotes')).data.remotes.find((x) => x.name === 'fakes3');
+      ok(s3Remote?.health?.status === 'ok' && /单桶/.test(s3Remote?.health?.remark || ''),
+        '网盘列表里单桶网盘状态为 ok（绿）且带 remark');
+      const browseRoot = await api('GET', '/api/browse?remote=fakes3&path=');
+      ok(browseRoot.status === 400 && browseRoot.data?.code === 'permission',
+        '浏览单桶网盘根目录返回 permission 码（前端据此给手动输入路径）', browseRoot.data?.error || '');
+      const browseBucket = await api('GET', '/api/browse?remote=fakes3&path=webdav');
+      ok(browseBucket.status === 200, '按桶名手动进入后可正常列目录（单桶令牌本就能用）');
+
+      const mkBad = await api('POST', '/api/remotes', {
+        name: 'bads3', type: 's3',
+        config: { provider: 'Other', access_key_id: 'ak-bad', secret_access_key: 'sk-bad', region: 'us-east-1', endpoint: 'http://127.0.0.1:18792' }
+      });
+      ok(mkBad.status === 200 && mkBad.data.test?.ok === false && /凭证/.test(mkBad.data.test?.cause || ''),
+        '真坏密钥仍判失败且原因指向凭证', mkBad.data.test?.cause || '');
+      const badRemote = (await api('GET', '/api/remotes')).data.remotes.find((x) => x.name === 'bads3');
+      ok(badRemote?.health?.status !== 'ok' && !badRemote?.health?.remark,
+        '真坏密钥网盘不被误判为 ok、无单桶 remark');
+    } finally { s3DeniedSrv.close(); s3BadSrv.close(); }
 
     console.log(failures === 0 ? '\n全部自测通过 ✅' : `\n有 ${failures} 项未通过 ❌`);
   } finally {

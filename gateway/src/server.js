@@ -60,8 +60,15 @@ async function providers() {
   return providersCache;
 }
 
-async function remoteList() {
-  const names = await rc.listRemotes();
+// 某类型里属于「密码/密钥」的字段名集合（编辑网盘时用来脱敏与兜底剔除）
+async function passwordFieldNames(type) {
+  const defs = await providers().catch(() => ({}));
+  const set = new Set();
+  for (const o of defs[type]?.options || []) if (o.type === 'password') set.add(o.name);
+  return set;
+}
+
+async function remoteList() {  const names = await rc.listRemotes();
   const out = [];
   for (const name of names) {
     let type = '';
@@ -171,6 +178,37 @@ export function createServer() {
           const test = await testRemote(name).catch((e) => ({ ok: false, cause: e.message }));
           return sendJson(res, 200, { ok: true, name, test });
         }
+        const cfgMatch = p.match(/^\/api\/remotes\/([^/]+)\/config$/);
+        if (cfgMatch && (req.method === 'GET' || req.method === 'PUT')) {
+          const name = decodeURIComponent(cfgMatch[1]);
+          let cur = null;
+          try { cur = await rc.getRemote(name); } catch { /* 不存在 */ }
+          // 注意：rclone 的 config/get 对不存在的网盘返回空对象 {} 而非报错，必须看 type 判断存在性
+          if (!cur || !cur.type) return sendJson(res, 404, { error: '网盘不存在' });
+          const type = cur.type || '';
+          const pwFields = await passwordFieldNames(type);
+          if (req.method === 'GET') {
+            // 密码/密钥类字段绝不回传明文（rclone 给的也是加密串）：只报告「哪些已保存」
+            const config = {};
+            const secrets = [];
+            for (const [k, v] of Object.entries(cur)) {
+              if (k === 'type') continue;
+              if (pwFields.has(k)) { if (v) secrets.push(k); continue; }
+              config[k] = v;
+            }
+            return sendJson(res, 200, { name, type, config, secrets });
+          }
+          // PUT 编辑保存：密码字段留空 = 不改（网关兜底剔除，不只靠前端）；其余空值同样不提交
+          const b = await readBody(req);
+          const params = {};
+          for (const [k, v] of Object.entries(b.config || {})) {
+            if (k === 'type' || v === '' || v === null || v === undefined) continue;
+            params[k] = v;
+          }
+          if (Object.keys(params).length) await rc.updateRemote(name, params);
+          const test = await testRemote(name).catch((e) => ({ ok: false, cause: e.message }));
+          return sendJson(res, 200, { ok: true, name, test });
+        }
         const remoteMatch = p.match(/^\/api\/remotes\/([^/]+)(?:\/(test|pause|resume))?$/);
         if (remoteMatch) {
           const name = decodeURIComponent(remoteMatch[1]);
@@ -202,10 +240,14 @@ export function createServer() {
           } catch (e) {
             // 浏览到不存在 / 打不开的路径：给一句白话提示即可，不要把 rclone 的英文报错甩给用户。
             // 注意：浏览时不自动建目录——建目录只发生在真正执行备份时（目标目录不存在会自动创建）
-            const hint = classifyError(e.message).kind === 'notfound'
+            // code 供前端区分处理：permission 时给「手动输入路径」兜底（见验收问题 #15）
+            const kind = classifyError(e.message).kind;
+            const hint = kind === 'notfound'
               ? '这个文件夹不存在（可能被改名、移动或删除了）。如果它是备份要存到的目标位置，不用管：执行备份时会自动创建。'
-              : `这个文件夹暂时打不开：${classifyError(e.message).reasonZh}`;
-            return sendJson(res, 400, { error: hint });
+              : kind === 'permission'
+                ? '这个网盘不允许列出这里的内容（常见于只有单个桶权限的令牌）。可以在下方手动输入路径继续。'
+                : `这个文件夹暂时打不开：${classifyError(e.message).reasonZh}`;
+            return sendJson(res, 400, { error: hint, code: kind });
           }
           const dirs = (list || []).filter((x) => x.IsDir)
             .map((x) => ({ name: x.Name, path: (sub && sub !== '/' ? sub.replace(/\/+$/, '') + '/' : sub === '/' ? '/' : '') + x.Name }));

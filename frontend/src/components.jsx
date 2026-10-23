@@ -23,7 +23,8 @@ const PATHS = {
   menu: 'M4 7h16M4 12h16M4 17h16',
   refresh: 'M20 12a8 8 0 1 1-2.34-5.66M20 3v4h-4',
   up: 'M12 19V5m-6 6 6-6 6 6',
-  logout: 'M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4m3 14 5-5-5-5m5 5H9'
+  logout: 'M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4m3 14 5-5-5-5m5 5H9',
+  edit: 'M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4zM14.5 5.5l3 3'
 };
 export function Icon({ name, size = 18, sw = 1.8 }) {
   return (
@@ -132,17 +133,26 @@ export function FolderPicker({ remote, remoteType, value, onChange }) {
   const [dirs, setDirs] = useState([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState('');
+  const [errCode, setErrCode] = useState('');
+  const [manual, setManual] = useState('');
 
   async function load(p) {
     if (!remote) return;
-    setLoading(true); setErr('');
+    setLoading(true); setErr(''); setErrCode('');
     try {
       const d = await api.get(`/browse?remote=${encodeURIComponent(remote)}&path=${encodeURIComponent(p)}`);
       setDirs(d.dirs || []);
       setPath(p);
       onChange(p);
-    } catch (e) { setErr(e.message); }
+    } catch (e) { setErr(e.message); setErrCode(e.data?.code || ''); }
     setLoading(false);
+  }
+  function useManual() {
+    const mp = manual.trim().replace(/^\/+|\/+$/g, '');
+    if (!mp) return;
+    setErr(''); setErrCode(''); setDirs([]);
+    setPath(mp);
+    onChange(mp);
   }
   useEffect(() => { if (remote) load(value || root); /* eslint-disable-next-line */ }, [remote]);
 
@@ -160,7 +170,25 @@ export function FolderPicker({ remote, remoteType, value, onChange }) {
         ))}
         <span style={{ marginLeft: 'auto', color: 'var(--text-3)' }}>已选：{path || '/（根目录）'}</span>
       </div>
-      {err && <div className="login-err">{err}</div>}
+      {err && errCode !== 'permission' && (
+        <div className="login-err">
+          {err}{' '}
+          <button className="btn-link" onClick={() => load(path)}>重试</button>
+        </div>
+      )}
+      {err && errCode === 'permission' && (
+        <div className="info-box">
+          <div>{err}</div>
+          <div style={{ marginTop: 6 }}>
+            手动输入路径即可继续：填<b>桶名</b>（例如 webdav）或<b>桶名/子目录</b>（例如 webdav/photos），输完点右边按钮，这个路径就会被选上。
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+            <input className="input" style={{ flex: 1 }} value={manual} onChange={(e) => setManual(e.target.value)}
+              placeholder="例如：webdav 或 webdav/photos" />
+            <button className="btn btn-primary btn-sm" onClick={useManual}>就用这个路径</button>
+          </div>
+        </div>
+      )}
       <div className="folder-list">
         {path !== root && (
           <div className="folder-item" onClick={() => load(parentPath)}>

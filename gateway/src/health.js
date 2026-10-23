@@ -11,7 +11,7 @@ import { cfg } from './config.js';
 function blankHealth() {
   return {
     status: 'unknown', failCount: 0, lastCheckAt: null, lastOkAt: null,
-    cause: '', downSince: null, notifiedDown: false, nextCheckAt: null
+    cause: '', remark: '', downSince: null, notifiedDown: false, nextCheckAt: null
   };
 }
 export function healthOf(name) {
@@ -20,6 +20,16 @@ export function healthOf(name) {
 }
 
 const inFlight = new Set(); // 防重入：同一网盘的检测不能并发（慢网盘会把调用堆死）
+
+// S3 单桶令牌的根目录探测必然被拒：列全部桶（ListBuckets）返回 AccessDenied(403)，
+// 这是最小权限令牌的预期行为、不是连接失败（真凭证错误是 InvalidAccessKeyId 等，见 classify）。
+const SINGLE_BUCKET_REMARK = '令牌为单桶权限，无法列出全部桶，属正常';
+async function isSingleBucketDenial(name, err) {
+  const msg = String(err?.message || '');
+  if (!/accessdenied|access denied/i.test(msg)) return false;
+  if (/invalidaccesskeyid|signaturedoesnotmatch|invalidclienttokenid/i.test(msg)) return false;
+  try { return ((await rc.getRemote(name))?.type || '') === 's3'; } catch { return false; }
+}
 
 export async function testRemote(name, { fromSchedule = false } = {}) {
   // 已暂停：定时自检直接跳过，不改动状态、不发通知；手动测试照常执行
@@ -30,11 +40,16 @@ export async function testRemote(name, { fromSchedule = false } = {}) {
   h.lastCheckAt = new Date().toISOString();
   h.nextCheckAt = new Date(Date.now() + cfg.healthRetryMs * 2).toISOString(); // 先占位，结果出来再覆盖
   try {
-    await rc.list(fsSpec(name, ''), '');
+    let listErr = null;
+    try { await rc.list(fsSpec(name, ''), ''); } catch (e) { listErr = e; }
+    // S3 根目录列举被拒但属于单桶令牌的正常现象 → 按连通处理，并附一句说明
+    const singleBucket = listErr ? await isSingleBucketDenial(name, listErr) : false;
+    if (listErr && !singleBucket) throw listErr;
     const wasDown = h.status === 'down';
     h.status = 'ok';
     h.failCount = 0;
     h.cause = '';
+    h.remark = singleBucket ? SINGLE_BUCKET_REMARK : '';
     h.downSince = null;
     h.notifiedDown = false;
     h.nextCheckAt = null;
@@ -44,10 +59,11 @@ export async function testRemote(name, { fromSchedule = false } = {}) {
       console.log(`[health] 网盘「${name}」已恢复连接`);
       notifyRemoteRecovered(name).catch(() => {});
     }
-    return { ok: true };
+    return singleBucket ? { ok: true, remark: h.remark } : { ok: true };
   } catch (e) {
     const { reasonZh } = classifyError(e.message);
     h.cause = reasonZh;
+    h.remark = '';
     h.failCount += 1;
     if (h.failCount >= cfg.healthFailThreshold) {
       const newlyDown = h.status !== 'down';
