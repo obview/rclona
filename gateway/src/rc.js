@@ -84,15 +84,15 @@ export const rc = {
   // 创建目录（连同上级目录一并创建），备份执行时用来自动补建不存在的目标目录
   mkdir: (fs, remote = '') => call('operations/mkdir', { fs, remote }, 45000),
   about: (fs) => call('operations/about', { fs }, 30000),
-  // excludeRules：相对源根目录的排除规则（如 ['proc/**']），经 rc 的 _filter 传入
-  // （rclone v1.75 实测：_filter 的字段名是 ExcludeRule，不是 Exclude）
-  check: (srcFs, dstFs, excludeRules) => call('operations/check', {
+  // filterRules：带 + / - 前缀的完整 rclone FilterRule（如 ['- proc/**', '+ *.zip', '- **']），
+  // 经 rc 的 _filter.FilterRule 传入，顺序就是规则生效顺序（v1.75.2 实测字段名无误）。
+  check: (srcFs, dstFs, filterRules) => call('operations/check', {
     srcFs, dstFs,
-    ...(excludeRules?.length ? { _filter: { ExcludeRule: excludeRules } } : {})
+    ...(filterRules?.length ? { _filter: { FilterRule: filterRules } } : {})
   }, 15 * 60 * 1000),
-  syncAsync: async (srcFs, dstFs, excludeRules) => (await call('sync/sync', {
+  syncAsync: async (srcFs, dstFs, filterRules) => (await call('sync/sync', {
     srcFs, dstFs, _async: true,
-    ...(excludeRules?.length ? { _filter: { ExcludeRule: excludeRules } } : {})
+    ...(filterRules?.length ? { _filter: { FilterRule: filterRules } } : {})
   })).jobid,
   jobStatus: (jobid) => call('job/status', { jobid }, 15000),
   stats: (group) => call('core/stats', { group }, 15000)

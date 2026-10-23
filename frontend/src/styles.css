@@ -247,6 +247,22 @@ input, select, textarea { font-family: inherit; font-size: 14px; color: var(--te
   background: var(--indigo-50); border-radius: 5px; padding: 1px 6px; margin-right: 7px;
 }
 .pair-map-arrow { color: var(--text-3); flex: 0 0 auto; }
+.pair-map-block { margin-bottom: 10px; }
+.pair-map-block .pair-map-row { margin-bottom: 4px; }
+.pair-filter-bar {
+  display: flex; align-items: center; gap: 8px; margin-left: 50px; min-height: 28px;
+  color: var(--text-3); font-size: 12.5px;
+}
+.pair-filter-bar .btn-link { padding-left: 0; }
+.pair-filter-editor {
+  margin: 2px 0 8px 50px; padding: 11px; border: 1px solid var(--border);
+  border-radius: 10px; background: #fbfcff;
+}
+.filter-rule-row {
+  display: grid; grid-template-columns: 104px 118px 118px minmax(150px, 1fr) auto;
+  gap: 8px; align-items: center; margin-bottom: 10px;
+}
+.filter-rule-preview { grid-column: 1 / -1; color: var(--text-2); font-size: 12.5px; }
 .switch { position: relative; width: 42px; height: 24px; flex: 0 0 auto; display: inline-block; }
 .switch input { opacity: 0; width: 0; height: 0; }
 .switch .track { position: absolute; inset: 0; border-radius: 999px; background: #ccd1e4; transition: .2s; cursor: pointer; }
@@ -443,6 +459,10 @@ input, select, textarea { font-family: inherit; font-size: 14px; color: var(--te
   .pair-flow { flex-direction: column; align-items: center; }
   .pair-mid { transform: rotate(90deg); min-height: 70px; }
   .form-grid { grid-template-columns: 1fr; }
+  .pair-filter-bar, .pair-filter-editor { margin-left: 0; }
+  .filter-rule-row { grid-template-columns: 1fr 1fr; }
+  .filter-rule-row .input { grid-column: 1 / -1; }
+  .filter-rule-row .btn-link { justify-self: end; }
   .dash-grid { grid-template-columns: 1fr; }
   .sys-grid { grid-template-columns: 1fr; }
   /* #20 返工（结构方案）：卡片改纵向堆叠——信息区独占一整行，宽度由结构决定、不可能被同排控件挤窄；

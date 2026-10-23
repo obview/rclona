@@ -3,14 +3,62 @@ import { api } from '../api.js';
 import { FolderPicker, Icon, Modal } from '../components.jsx';
 import { fmtAgo, fmtTime, scheduleText, WEEKDAYS } from '../util.js';
 
+const FILTER_ACTIONS = [
+  { value: 'exclude', label: '排除' },
+  { value: 'include', label: '仅同步' }
+];
+const FILTER_TARGETS = [
+  { value: 'any', label: '不限对象' },
+  { value: 'file', label: '文件' },
+  { value: 'folder', label: '文件夹' }
+];
+const FILTER_MATCHES = [
+  { value: 'contains', label: '名字包含' },
+  { value: 'exact', label: '名字等于' },
+  { value: 'ext', label: '扩展名' },
+  { value: 'glob', label: '通配符' }
+];
+const FILTER_LABEL = (list, value) => list.find((x) => x.value === value)?.label || value;
+
+export function filterPreview(f) {
+  const raw = String(f?.value || '').trim();
+  const shown = f?.match === 'ext' ? `.${raw.replace(/^\.+/, '')}` : (raw || '（未填写）');
+  const matchText = f?.match === 'contains' ? `名字包含 ${shown}`
+    : f?.match === 'exact' ? `名字等于 ${shown}`
+    : f?.match === 'ext' ? `扩展名 ${shown}`
+    : `通配符 ${shown}`;
+  return `${FILTER_LABEL(FILTER_ACTIONS, f?.action)} · ${FILTER_LABEL(FILTER_TARGETS, f?.target)} · ${matchText}`;
+}
+
+function filterPlaceholder(f) {
+  if (f.match === 'ext') return '例如 zip 或 .zip';
+  if (f.match === 'glob') return '例如 docs/*.txt 或 cache-*';
+  if (f.match === 'exact') return '例如 report';
+  return '例如 cache';
+}
+
+const cleanPairFilters = (filters) => (Array.isArray(filters)
+  ? filters.map((f) => ({
+    action: f?.action || 'exclude',
+    target: f?.target || 'any',
+    match: f?.match || 'contains',
+    value: f?.value || ''
+  }))
+  : []);
+
 function TaskForm({ remotes, initial, onDone, toast }) {
   const [name, setName] = useState(initial?.name || '');
   const [srcRemote, setSrcRemote] = useState(initial?.srcRemote || '');
   const [dstRemote, setDstRemote] = useState(initial?.dstRemote || '');
   // #25：文件夹映射列表（源网盘、目标网盘是任务级的；每组各选一个源文件夹与目标文件夹）
   const [pairs, setPairs] = useState(() => {
-    if (initial?.pairs && initial.pairs.length) return initial.pairs.map((x) => ({ src: x.src || '', dst: x.dst || '' }));
-    return [{ src: initial?.srcPath || '', dst: initial?.dstPath || '' }];
+    if (initial?.pairs && initial.pairs.length) {
+      return initial.pairs.map((x) => {
+        const filters = cleanPairFilters(x.filters);
+        return { src: x.src || '', dst: x.dst || '', filters, filtersOpen: filters.length > 0 };
+      });
+    }
+    return [{ src: initial?.srcPath || '', dst: initial?.dstPath || '', filters: [], filtersOpen: false }];
   });
   const [picking, setPicking] = useState(null); // { idx, side: 'src' | 'dst' }
   const s0 = initial?.schedule || {};
@@ -31,6 +79,19 @@ function TaskForm({ remotes, initial, onDone, toast }) {
   function setPairPath(idx, side, path) {
     setPairs((prev) => prev.map((x, i) => (i === idx ? { ...x, [side]: path } : x)));
   }
+  function updatePairFilters(idx, updater) {
+    setPairs((prev) => prev.map((x, i) => (i === idx ? { ...x, filters: updater(x.filters || []) } : x)));
+  }
+  function addFilter(idx) {
+    updatePairFilters(idx, (filters) => [...filters, { action: 'exclude', target: 'any', match: 'contains', value: '' }]);
+    setPairs((prev) => prev.map((x, i) => (i === idx ? { ...x, filtersOpen: true } : x)));
+  }
+  function updateFilter(idx, filterIdx, patch) {
+    updatePairFilters(idx, (filters) => filters.map((f, j) => (j === filterIdx ? { ...f, ...patch } : f)));
+  }
+  function removeFilter(idx, filterIdx) {
+    updatePairFilters(idx, (filters) => filters.filter((_, j) => j !== filterIdx));
+  }
   function changeRemote(side, value) {
     // 换了网盘，原来在旧网盘里选的文件夹路径就不作数了，清掉这一侧全部组的选择
     if (side === 'src') { setSrcRemote(value); setPairs((prev) => prev.map((x) => ({ ...x, src: '' }))); }
@@ -44,6 +105,17 @@ function TaskForm({ remotes, initial, onDone, toast }) {
     if (!pairs.length) { setErr('至少要有一组文件夹映射'); return; }
     const sameIdx = pairs.findIndex((x) => srcRemote === dstRemote && x.src === x.dst);
     if (sameIdx >= 0) { setErr(`第 ${sameIdx + 1} 组的源和目标是同一个位置，换一个目标文件夹`); return; }
+    for (let i = 0; i < pairs.length; i++) {
+      const filters = pairs[i].filters || [];
+      for (let j = 0; j < filters.length; j++) {
+        const f = filters[j];
+        if (!String(f.value || '').trim()) { setErr(`第 ${i + 1} 组第 ${j + 1} 条筛选的内容不能为空`); return; }
+        if (f.match === 'ext') {
+          const ext = String(f.value).trim().replace(/^\.+/, '');
+          if (!ext || /[\s/\\*?[\]{}]/.test(ext)) { setErr(`第 ${i + 1} 组第 ${j + 1} 条筛选的扩展名格式不对，请填 zip 或 .zip`); return; }
+        }
+      }
+    }
     if (schedType === 'weekly' && weekdays.length === 0) { setErr('每周方式至少要选一个星期'); return; }
     if (schedType === 'cron' && cron.trim().split(/\s+/).length !== 5) { setErr('cron 表达式要是五段：分 时 日 月 周，例如 30 3 * * *'); return; }
     setSaving(true);
@@ -55,7 +127,9 @@ function TaskForm({ remotes, initial, onDone, toast }) {
     if (schedType === 'cron') schedule.cron = cron.trim();
     const body = {
       name: name.trim() || `${srcRemote} → ${dstRemote}`,
-      srcRemote, dstRemote, pairs, schedule
+      srcRemote, dstRemote,
+      pairs: pairs.map(({ src, dst, filters }) => ({ src, dst, filters: cleanPairFilters(filters) })),
+      schedule
     };
     try {
       if (initial?.id) await api.put(`/tasks/${initial.id}`, body);
@@ -93,24 +167,61 @@ function TaskForm({ remotes, initial, onDone, toast }) {
       <div className="field" style={{ marginBottom: 10 }}>
         <label>文件夹映射 <span className="hint">（一个任务可以备多个文件夹：每组选一个源文件夹和它要去的目标文件夹）</span></label>
         {pairs.map((x, i) => (
-          <div className="pair-map-row" key={i}>
-            <span className="pair-map-no">第 {i + 1} 组</span>
-            <button type="button" className="pair-map-cell" title="点这里选源文件夹"
-              onClick={() => setPicking({ idx: i, side: 'src' })}>
-              <span className="pair-map-tag">源</span>{pathLabel(x.src)}
-            </button>
-            <span className="pair-map-arrow">→</span>
-            <button type="button" className="pair-map-cell" title="点这里选目标文件夹"
-              onClick={() => setPicking({ idx: i, side: 'dst' })}>
-              <span className="pair-map-tag">目标</span>{pathLabel(x.dst)}
-            </button>
-            <button type="button" className="btn-link danger" disabled={pairs.length <= 1}
-              title={pairs.length <= 1 ? '至少保留一组' : '删掉这一组'}
-              onClick={() => { setPairs((prev) => prev.filter((_, j) => j !== i)); setPicking(null); }}>删除</button>
+          <div className="pair-map-block" key={i}>
+            <div className="pair-map-row">
+              <span className="pair-map-no">第 {i + 1} 组</span>
+              <button type="button" className="pair-map-cell" title="点这里选源文件夹"
+                onClick={() => setPicking({ idx: i, side: 'src' })}>
+                <span className="pair-map-tag">源</span>{pathLabel(x.src)}
+              </button>
+              <span className="pair-map-arrow">→</span>
+              <button type="button" className="pair-map-cell" title="点这里选目标文件夹"
+                onClick={() => setPicking({ idx: i, side: 'dst' })}>
+                <span className="pair-map-tag">目标</span>{pathLabel(x.dst)}
+              </button>
+              <button type="button" className="btn-link danger" disabled={pairs.length <= 1}
+                title={pairs.length <= 1 ? '至少保留一组' : '删掉这一组'}
+                onClick={() => { setPairs((prev) => prev.filter((_, j) => j !== i)); setPicking(null); }}>删除</button>
+            </div>
+            <div className="pair-filter-bar">
+              <button type="button" className="btn-link" aria-expanded={!!x.filtersOpen}
+                onClick={() => setPairs((prev) => prev.map((p, j) => (j === i ? { ...p, filtersOpen: !p.filtersOpen } : p)))}>
+                筛选{x.filters?.length ? `（${x.filters.length} 条）` : ''} {x.filtersOpen ? '收起' : '展开'}
+              </button>
+              <span>{x.filters?.length ? '已设置筛选' : '无筛选（全部同步）'}</span>
+            </div>
+            {x.filtersOpen && (
+              <div className="pair-filter-editor">
+                {(x.filters || []).map((f, fi) => (
+                  <div className="filter-rule-row" key={fi}>
+                    <select className="select" aria-label="筛选作用" value={f.action}
+                      onChange={(e) => updateFilter(i, fi, { action: e.target.value })}>
+                      {FILTER_ACTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                    <select className="select" aria-label="筛选对象" value={f.target}
+                      onChange={(e) => updateFilter(i, fi, { target: e.target.value })}>
+                      {FILTER_TARGETS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                    <select className="select" aria-label="匹配方式" value={f.match}
+                      onChange={(e) => updateFilter(i, fi, { match: e.target.value })}>
+                      {FILTER_MATCHES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                    <input className="input" aria-label="筛选内容" value={f.value}
+                      placeholder={filterPlaceholder(f)}
+                      onChange={(e) => updateFilter(i, fi, { value: e.target.value })} />
+                    <button type="button" className="btn-link danger" onClick={() => removeFilter(i, fi)}>删除规则</button>
+                    <div className="filter-rule-preview">{filterPreview(f)}</div>
+                  </div>
+                ))}
+                <button type="button" className="btn btn-ghost btn-sm" onClick={() => addFilter(i)}>
+                  <Icon name="plus" size={14} /> 添加规则
+                </button>
+              </div>
+            )}
           </div>
         ))}
         <button type="button" className="btn btn-ghost btn-sm" style={{ marginTop: 8 }}
-          onClick={() => setPairs((prev) => [...prev, { src: '', dst: '' }])}>
+          onClick={() => setPairs((prev) => [...prev, { src: '', dst: '', filters: [], filtersOpen: false }])}>
           <Icon name="plus" size={14} /> 添加一组
         </button>
       </div>

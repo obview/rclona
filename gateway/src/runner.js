@@ -2,6 +2,7 @@ import { store, newId, pairsOf } from './store.js';
 import { rc, fsSpec } from './rc.js';
 import { stageReason, classifyError } from './classify.js';
 import { notifyBackupFailure, notifyFirstScheduledSuccess } from './notifier.js';
+import { pairFilterRules, escapeFilterLiteral } from './filters.js';
 import { cfg } from './config.js';
 
 // 备份执行：固定五阶段。先做飞行前检查（把失败定位到阶段），再跑真正的 sync，最后校验
@@ -92,9 +93,10 @@ async function runPair({ task, pair, log, stages, stats, onProgress }) {
   };
   try {
     // #14：本组源是宿主机根目录（/host）时，自动排除系统虚拟目录（扫描/同步/校验全程一致）
-    let excludeRules = await hostExcludesFor(task.srcRemote, pair.src).catch(() => null);
-    const skipTopDirs = excludeRules ? new Set(HOST_VIRTUAL_DIRS) : null;
-    if (excludeRules) log(`源是服务器根目录（${HOST_MOUNT}），已自动排除系统虚拟目录：${HOST_VIRTUAL_DIRS.join('、')}`);
+    const hostPatterns = await hostExcludesFor(task.srcRemote, pair.src).catch(() => null);
+    let autoFilterRules = (hostPatterns || []).map((p) => `- ${p}`);
+    const skipTopDirs = hostPatterns ? new Set(HOST_VIRTUAL_DIRS) : null;
+    if (hostPatterns) log(`源是服务器根目录（${HOST_MOUNT}），已自动排除系统虚拟目录：${HOST_VIRTUAL_DIRS.join('、')}`);
 
     // 阶段 1：连接源网盘
     let t0 = Date.now();
@@ -138,23 +140,26 @@ async function runPair({ task, pair, log, stages, stats, onProgress }) {
     setStage(2, 'ok', Date.now() - t0);
     log('目标网盘连接正常');
 
-    // #18：识别同名空占位并逐个精确排除，与 /host 排除合并后同一份规则传给 sync 与 check。
-    // 检测本身出问题不能反过来绊倒备份：记一句日志、按原样继续。
+    // #18：识别同名空占位并逐个精确排除；#26：再把本组用户筛选翻译成 FilterRule。
+    // 合并顺序固定：系统自动排除（/host、空占位）在前，用户规则在后，任何用户规则
+    // 都不能把系统已排除的内容又放回来；同一份合并规则传给 sync 与 check。
     try {
       const placeholders = await findPlaceholderPaths(srcFs);
       if (placeholders.length) {
-        excludeRules = [...(excludeRules || []), ...placeholders];
+        autoFilterRules.push(...placeholders.map((p) => `- /${escapeFilterLiteral(p)}`));
         log(`已自动跳过 ${placeholders.length} 个空占位对象（0 字节、与文件夹同名）：${placeholders.join('、')}`);
       }
     } catch (e) {
       log(`空占位对象检测未完成（${e.message}），按原样继续同步`);
     }
+    const filterRules = [...autoFilterRules, ...pairFilterRules(pair.filters)];
+    if (pair.filters?.length) log(`本组已启用 ${pair.filters.length} 条文件筛选规则`);
 
     // 阶段 4：真正传输（rc sync 异步任务，轮询状态）
     t0 = Date.now();
     setStage(3, 'running');
     let jobid;
-    try { jobid = await rc.syncAsync(srcFs, dstFs, excludeRules); }
+    try { jobid = await rc.syncAsync(srcFs, dstFs, filterRules); }
     catch (e) { return failAt(3, e.message); }
     // 把这次同步的统计搬进本组统计：成功时是最终账，失败/超时时是「已传部分」的如实账（#18，不再记 0）
     const pullJobStats = async () => {
@@ -184,7 +189,7 @@ async function runPair({ task, pair, log, stages, stats, onProgress }) {
     t0 = Date.now();
     setStage(4, 'running');
     try {
-      const chk = await rc.check(srcFs, dstFs, excludeRules);
+      const chk = await rc.check(srcFs, dstFs, filterRules);
       const diffs = [...(chk.differ || []), ...(chk.missingOnSrc || []), ...(chk.missingOnDst || [])];
       const errs = chk.error || [];
       if (errs.length) return failAt(4, errs[0]);

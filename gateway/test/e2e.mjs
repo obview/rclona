@@ -6,6 +6,7 @@ import path from 'node:path';
 import http from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { classifyError } from '../src/classify.js';
+import { pairFilterRules } from '../src/filters.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const T = '/tmp/rclona-e2e';
@@ -925,6 +926,120 @@ async function main() {
     ok(oldLogin.status === 401, '改密后旧密码不能再登录');
     const newLogin = await api('POST', '/api/auth/login', { user: 'tester', password: 'newpass456' });
     ok(newLogin.status === 200, '改密后新密码可以登录');
+
+    console.log('== 19. #26：每组映射的文件筛选（翻译 + 真实同步 + 与空占位共存）==');
+    // 19a 翻译层：结构化规则 -> rclone FilterRule 的关键形态
+    const folderExcludeRules = pairFilterRules([
+      { action: 'exclude', target: 'folder', match: 'contains', value: 'cache' }
+    ]);
+    ok(folderExcludeRules.includes('- *cache*/**') && folderExcludeRules.includes('- **/*cache*/**')
+      && !folderExcludeRules.includes('- **'),
+      '翻译：排除「文件夹名字包含 cache」会覆盖根层与深层目录、且不误加全排除兜底',
+      folderExcludeRules.join(' | '));
+    ok(JSON.stringify(pairFilterRules([
+      { action: 'include', target: 'file', match: 'ext', value: '.zip' }
+    ])) === JSON.stringify(['+ *.zip', '- **']),
+      '翻译：仅同步「文件扩展名 .zip」生成 include 规则并补 - ** 兜底');
+    const fileExactRules = pairFilterRules([
+      { action: 'include', target: 'file', match: 'exact', value: 'report' }
+    ]);
+    ok(fileExactRules.includes('+ report') && !fileExactRules.some((r) => r.includes('report/**')),
+      '翻译：仅同步「文件名字等于 report」不会放行同名文件夹的内容');
+
+    // 19b 校验：筛选内容为空时整单拒绝（中文提示）
+    const badFilterTask = await api('POST', '/api/tasks', {
+      name: '空筛选', srcRemote: 'tsrc', dstRemote: 'tdst',
+      pairs: [{ src: srcDir, dst: dstDir, filters: [{ action: 'exclude', target: 'file', match: 'contains', value: '' }] }],
+      schedule: { type: 'daily', time: '04:00' }
+    });
+    ok(badFilterTask.status !== 200 && /筛选.*不能为空/.test(badFilterTask.data?.error || ''),
+      '筛选内容为空被拒绝（中文提示）', badFilterTask.data?.error || '');
+
+    // 19c 造源：一棵同时含缓存文件夹、同名文件/文件夹、多种扩展名的树
+    const fltSrc = path.join(T, 'filter', 'data');
+    const mkFile = (rel, text) => {
+      const p = path.join(fltSrc, rel);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, text);
+    };
+    mkFile('cache-data/secret.txt', 'cache secret');
+    mkFile('nested/cache-tmp/inner.zip', 'nested cache zip');
+    mkFile('cache-notes.txt', 'file name contains cache');
+    mkFile('keep/data.zip', 'keep zip');
+    mkFile('backup.zip', 'root zip');
+    mkFile('keep/notes.txt', 'keep notes');
+    mkFile('keep/photo.jpg', 'keep photo');
+    mkFile('named-file/report', 'the report file');
+    mkFile('named-folder/report/inside.txt', 'inside report folder');
+    const runFilterTask = async (name, filters, dst, src = fltSrc, remote = 'tsrc') => {
+      const made = await api('POST', '/api/tasks', {
+        name, srcRemote: remote, dstRemote: 'tdst',
+        pairs: [{ src, dst, filters }],
+        schedule: { type: 'daily', time: '04:00' }
+      });
+      if (made.status !== 200) throw new Error(`筛选任务创建失败：${JSON.stringify(made.data)}`);
+      await api('POST', `/api/tasks/${made.data.task.id}/run`);
+      return waitFor(async () => {
+        const d = await api('GET', `/api/runs?taskId=${made.data.task.id}`);
+        const r = d.data.runs?.[0];
+        return r && r.status !== 'running' ? r : null;
+      }, 60000);
+    };
+
+    // 排除文件夹（名字包含 cache）：文件夹没了，同名文件不受影响
+    const fltDst1 = path.join(T, 'filterbak', 'exclude-folder');
+    const fltRun1 = await runFilterTask('筛选-排除缓存文件夹', [
+      { action: 'exclude', target: 'folder', match: 'contains', value: 'cache' }
+    ], fltDst1);
+    ok(fltRun1.status === 'success', '排除文件夹的任务运行成功', `状态=${fltRun1.status} ${fltRun1.reasonZh || ''}`);
+    ok(!fs.existsSync(path.join(fltDst1, 'cache-data')) && !fs.existsSync(path.join(fltDst1, 'nested', 'cache-tmp')),
+      '名字包含 cache 的文件夹（根层与深层）都没有同步过去');
+    ok(fs.readFileSync(path.join(fltDst1, 'cache-notes.txt'), 'utf8') === 'file name contains cache'
+      && fs.readFileSync(path.join(fltDst1, 'keep', 'notes.txt'), 'utf8') === 'keep notes',
+      '文件夹规则没有误伤同名文件，其它文件正常同步');
+
+    // 仅同步文件扩展名 .zip：只有 zip 到位
+    const fltDst2 = path.join(T, 'filterbak', 'only-zip');
+    const fltRun2 = await runFilterTask('筛选-只要zip', [
+      { action: 'include', target: 'file', match: 'ext', value: '.zip' }
+    ], fltDst2);
+    ok(fltRun2.status === 'success', '仅同步扩展名的任务运行成功', `状态=${fltRun2.status} ${fltRun2.reasonZh || ''}`);
+    ok(fs.readFileSync(path.join(fltDst2, 'backup.zip'), 'utf8') === 'root zip'
+      && fs.readFileSync(path.join(fltDst2, 'keep', 'data.zip'), 'utf8') === 'keep zip'
+      && fs.readFileSync(path.join(fltDst2, 'nested', 'cache-tmp', 'inner.zip'), 'utf8') === 'nested cache zip',
+      '根层与子目录里的 .zip 文件都同步到位');
+    ok(!fs.existsSync(path.join(fltDst2, 'keep', 'notes.txt')) && !fs.existsSync(path.join(fltDst2, 'keep', 'photo.jpg'))
+      && !fs.existsSync(path.join(fltDst2, 'cache-notes.txt')),
+      '非 .zip 文件没有同步过去');
+
+    // 仅同步「文件」名字等于 report：文件到位，同名文件夹的内容不来
+    const fltDst3 = path.join(T, 'filterbak', 'only-report-file');
+    const fltRun3 = await runFilterTask('筛选-只要report文件', [
+      { action: 'include', target: 'file', match: 'exact', value: 'report' }
+    ], fltDst3);
+    ok(fltRun3.status === 'success', '仅同步同名文件的任务运行成功', `状态=${fltRun3.status} ${fltRun3.reasonZh || ''}`);
+    ok(fs.readFileSync(path.join(fltDst3, 'named-file', 'report'), 'utf8') === 'the report file',
+      '名为 report 的文件同步到位');
+    ok(!fs.existsSync(path.join(fltDst3, 'named-folder', 'report', 'inside.txt')),
+      '名为 report 的文件夹内容没有被文件规则误放行');
+
+    // 19d 与 #18 共存：重新把占位 fixture 灌回 memory 网盘（第 17 节重启过网关，内存内容已清空），
+    // 用户规则（排除文件 other.txt）与空占位自动跳过同时生效
+    await rcdCall('sync/copy', { srcFs: stC, dstFs: 'tmem:appdata/legado' });
+    await rcdCall('sync/copy', { srcFs: stA, dstFs: 'tmem:' });
+    await rcdCall('sync/copy', { srcFs: stB, dstFs: 'tmem:' });
+    const phDst2 = path.join(T, 'phbak-filter');
+    const fltRun4 = await runFilterTask('筛选与空占位共存', [
+      { action: 'exclude', target: 'file', match: 'exact', value: 'other.txt' }
+    ], phDst2, '', 'tmem');
+    ok(fltRun4.status === 'success', '带用户筛选时含空占位的任务仍运行成功',
+      `状态=${fltRun4.status} ${fltRun4.reasonZh || ''}`);
+    ok(fs.readFileSync(path.join(phDst2, 'appdata', 'legado', 'inner.txt'), 'utf8') === 'realdata',
+      '空占位同名目录里的真文件仍同步到位（自动跳过未被用户规则覆盖）');
+    ok(!fs.existsSync(path.join(phDst2, 'appdata', 'other.txt')),
+      '用户筛选规则同时生效（other.txt 被排除）');
+    ok(/已自动跳过 2 个空占位对象/.test(fltRun4.logExcerpt || ''),
+      '日志仍注明自动跳过的空占位数量');
 
     console.log(failures === 0 ? '\n全部自测通过 ✅' : `\n有 ${failures} 项未通过 ❌`);
   } finally {

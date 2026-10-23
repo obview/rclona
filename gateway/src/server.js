@@ -15,6 +15,7 @@ import { healthOf, testRemote } from './health.js';
 import { runTask, isRunning } from './runner.js';
 import { sendTestTelegram } from './notifier.js';
 import { normalizeSchedule, nextSlotAfter, validateCron, validHM } from './schedule.js';
+import { normalizePairFilters } from './filters.js';
 import { nextHealthCheckAt } from './scheduler.js';
 
 const SERVER_STARTED_AT = new Date().toISOString();
@@ -437,7 +438,11 @@ function validateTask(b) {
     rawPairs = [{ src: b.srcPath, dst: b.dstPath }];
   }
   const cleanPath = (v) => String(v ?? '').replace(/\/+$/, '');
-  const pairs = rawPairs.map((p) => ({ src: cleanPath(p?.src), dst: cleanPath(p?.dst) }));
+  const pairs = rawPairs.map((p, i) => ({
+    src: cleanPath(p?.src),
+    dst: cleanPath(p?.dst),
+    filters: normalizePairFilters(p?.filters, i + 1)
+  }));
   pairs.forEach((p, i) => {
     if (srcRemote === dstRemote && p.src === p.dst) {
       throw new Error(`第 ${i + 1} 组的源和目标是同一个位置，换一个目标文件夹`);

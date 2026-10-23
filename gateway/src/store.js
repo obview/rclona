@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { normalizeSchedule } from './schedule.js';
+import { normalizePairFilters } from './filters.js';
 
 // 极简的 JSON 持久化：数据量很小（任务、记录、设置），整存整取 + 原子写
 const FILE = 'rclona.json';
@@ -15,10 +16,13 @@ export function newId() {
 // 任务上同时保留 srcPath/dstPath 作为 pairs[0] 的镜像，概览等老代码读它们不受影响。
 export function pairsOf(t) {
   const clean = (v) => String(v ?? '').replace(/\/+$/, '');
+  const cleanFilters = (filters) => {
+    try { return normalizePairFilters(filters); } catch { return []; }
+  };
   if (Array.isArray(t?.pairs) && t.pairs.length) {
-    return t.pairs.map((p) => ({ src: clean(p?.src), dst: clean(p?.dst) }));
+    return t.pairs.map((p) => ({ src: clean(p?.src), dst: clean(p?.dst), filters: cleanFilters(p?.filters) }));
   }
-  return [{ src: clean(t?.srcPath), dst: clean(t?.dstPath) }];
+  return [{ src: clean(t?.srcPath), dst: clean(t?.dstPath), filters: [] }];
 }
 
 const DEFAULT_STATS = () => ({
