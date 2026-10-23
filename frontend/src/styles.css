@@ -72,6 +72,9 @@ input, select, textarea { font-family: inherit; font-size: 14px; color: var(--te
 .drive-row:hover { background: rgba(255,255,255,.08); }
 .drive-row .dname { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .drive-row .badge-num { font-size: 11px; color: #a7abd0; }
+/* #16：侧栏状态点学 MultCloud 的干净实心小圆点（行尾右对齐由 .dname 的 flex:1 推过去），
+   去掉浅色光晕圈——那圈是给白色卡片配的，在深色侧栏上显脏显怪 */
+.drive-row .status-dot { width: 8px; height: 8px; box-shadow: none; }
 .side-foot { margin-top: auto; padding: 14px 20px 18px; border-top: 1px solid rgba(255,255,255,.1); font-size: 12px; color: #9aa0cc; }
 .side-foot button { background: none; border: none; color: #cfd3ee; font-size: 13px; padding: 0; display: inline-flex; align-items: center; gap: 6px; }
 .side-foot button:hover { color: #fff; }
@@ -359,7 +362,9 @@ input, select, textarea { font-family: inherit; font-size: 14px; color: var(--te
   .brand-text, .brand-sub, .side-section, .nav-label, .side-acct,
   .drive-row .dname, .drive-row .badge-num { display: none; }
   .nav-item { justify-content: center; padding: 10px 0; margin: 2px 12px; width: calc(100% - 24px); }
-  .drive-row { justify-content: center; padding: 8px 0; margin: 1px 12px; width: calc(100% - 24px); }
+  .drive-row { justify-content: center; padding: 8px 0; margin: 1px 12px; width: calc(100% - 24px); position: relative; }
+  /* 图标栏形态：状态点缩成小徽标点，贴在网盘图标右上方，不占行宽不溢出 */
+  .drive-row .status-dot { position: absolute; top: 3px; right: 13px; width: 7px; height: 7px; }
   .side-foot { padding: 14px 0 18px; text-align: center; }
   .page { padding: 22px 20px 40px; }
 }
@@ -380,6 +385,8 @@ input, select, textarea { font-family: inherit; font-size: 14px; color: var(--te
   .drive-row .dname { display: block; }
   .nav-item { justify-content: flex-start; padding: 8px 12px; margin: 2px 10px; width: calc(100% - 20px); }
   .drive-row { justify-content: flex-start; padding: 6px 12px; margin: 1px 10px; width: calc(100% - 20px); }
+  /* 抽屉里恢复静态排布：点回到行尾（覆盖图标栏的绝对定位） */
+  .drive-row .status-dot { position: static; width: 8px; height: 8px; }
   .side-foot { padding: 14px 20px 18px; text-align: left; }
   .nav-toggle { display: inline-flex; }
   .topbar { padding: 0 14px; }

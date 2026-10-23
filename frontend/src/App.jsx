@@ -149,10 +149,10 @@ export default function App() {
           {drives.map((d) => (
             <button className="drive-row" key={d.name} onClick={() => nav('remotes')}
               title={d.paused ? `${d.name}（已暂停）` : d.name}>
-              <span className={`status-dot ${driveDotClass(d)}`} />
               <BrandBadge remote={d} size={19} />
               <span className="dname">{d.name}</span>
               <span className="badge-num">{d.paused ? '已暂停' : d.type}</span>
+              <span className={`status-dot ${driveDotClass(d)}`} />
             </button>
           ))}
           <button className="drive-row" onClick={() => nav('remotes')}>
