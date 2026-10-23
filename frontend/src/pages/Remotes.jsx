@@ -262,7 +262,7 @@ export default function Remotes({ toast, nav }) {
         {(remotes || []).map((r) => (
           <div className="task-row" key={r.name} style={r.paused ? { opacity: 0.82 } : undefined}>
             <BrandBadge remote={r} size={46} />
-            <div style={{ flex: 1 }}>
+            <div className="row-main" style={{ flex: 1 }}>
               <div style={{ fontWeight: 700, fontSize: 15 }}>{r.name}</div>
               <div style={{ color: 'var(--text-3)', fontSize: 12.5 }}>
                 类型：{typeLabel(r.type)}

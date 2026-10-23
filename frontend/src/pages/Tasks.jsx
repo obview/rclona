@@ -239,7 +239,7 @@ export default function Tasks({ toast }) {
         {(tasks || []).map((t) => (
           <div className="task-row" key={t.id}>
             <div className="task-ico"><Icon name="sync" size={23} /></div>
-            <div style={{ flex: 1, minWidth: 0 }}>
+            <div className="row-main" style={{ flex: 1, minWidth: 0 }}>
               <div style={{ fontWeight: 700, fontSize: 15 }}>{t.name}</div>
               <div style={{ color: 'var(--text-2)', fontSize: 13 }}>
                 从 <b>{t.srcRemote}</b>{t.srcPath ? '/' + t.srcPath : ''} → 到 <b>{t.dstRemote}</b>{t.dstPath ? '/' + t.dstPath : ''}
