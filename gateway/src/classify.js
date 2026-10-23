@@ -4,6 +4,10 @@
 // - AccessDenied（403）只说明「这个凭证无权做这件事」——例如单桶令牌列不出全部桶，凭证本身是好的，
 //   归到「权限不足」，绝不能误报成凭证错误（曾把用户的 R2 单桶令牌误判失效，见验收问题 #15）。
 const RULES = [
+  // #27：删除安全阀拦下——errText 由 runner 构造（含「安全阀」与具体数字），
+  // 这里兜底归类，保证任何经 stageReason 的路径都显示同一口径的人话。
+  { kind: 'guard', re: /安全阀|max[-\s]?delete/i,
+    reason: '删除安全阀已拦下这次备份（一次要删的文件太多，已中止以防误删；先用「试运行」看清将删清单，或在任务设置里调高上限）' },
   { kind: 'space', re: /no space left|insufficient space|quota exceeded|storage (limit|full)|507|disk full|exceeded.*quota/i,
     reason: '空间不足（目标网盘容量不够，删掉一些文件或扩容后重试）' },
   { kind: 'network', re: /dial tcp|i\/o timeout|connection refused|connection reset|no such host|network is unreachable|econnrefused|enotfound|etimedout|tls handshake|context deadline|server misbehaving|broken pipe|unexpected eof/i,

@@ -83,16 +83,26 @@ export const rc = {
   listAll: (fs) => call('operations/list', { fs, remote: '', opt: { recurse: true } }, 120000),
   // 创建目录（连同上级目录一并创建），备份执行时用来自动补建不存在的目标目录
   mkdir: (fs, remote = '') => call('operations/mkdir', { fs, remote }, 45000),
+  // 删除整个目录（连同内容），#27 归档过期清理用
+  purge: (fs, remote = '') => call('operations/purge', { fs, remote }, 120000),
   about: (fs) => call('operations/about', { fs }, 30000),
+  // 全局带宽限速的读/设（#27 限速）：rc 的 _config 里 BwLimit 在 1.75.2 实测不生效，
+  // 只有 core/bwlimit 这个全局开关真能限住（同步开始前设、结束后恢复原值）
+  bwlimitGet: () => call('core/bwlimit', {}, 15000),
+  bwlimitSet: (rate) => call('core/bwlimit', { rate }, 15000),
   // filterRules：带 + / - 前缀的完整 rclone FilterRule（如 ['- proc/**', '+ *.zip', '- **']），
   // 经 rc 的 _filter.FilterRule 传入，顺序就是规则生效顺序（v1.75.2 实测字段名无误）。
   check: (srcFs, dstFs, filterRules) => call('operations/check', {
     srcFs, dstFs,
     ...(filterRules?.length ? { _filter: { FilterRule: filterRules } } : {})
   }, 15 * 60 * 1000),
-  syncAsync: async (srcFs, dstFs, filterRules) => (await call('sync/sync', {
+  // configOpts：rclone 的单次调用级配置（_config），#27 用到的键已在 1.75.2 实测：
+  // BackupDir（旧版本归档目录）、TrackRenames（改名识别）、DryRun（试运行）均真实生效；
+  // BwLimit 在 _config 里不生效（见上方 bwlimitSet 的注释），不要往这里塞。
+  syncAsync: async (srcFs, dstFs, filterRules, configOpts) => (await call('sync/sync', {
     srcFs, dstFs, _async: true,
-    ...(filterRules?.length ? { _filter: { FilterRule: filterRules } } : {})
+    ...(filterRules?.length ? { _filter: { FilterRule: filterRules } } : {}),
+    ...(configOpts && Object.keys(configOpts).length ? { _config: configOpts } : {})
   })).jobid,
   jobStatus: (jobid) => call('job/status', { jobid }, 15000),
   stats: (group) => call('core/stats', { group }, 15000)

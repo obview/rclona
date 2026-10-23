@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
-import { FolderPicker, Icon, Modal } from '../components.jsx';
+import { FolderPicker, Icon, Modal, HelpTip } from '../components.jsx';
 import { fmtAgo, fmtTime, scheduleText, WEEKDAYS } from '../util.js';
 
 const FILTER_ACTIONS = [
@@ -70,6 +70,15 @@ function TaskForm({ remotes, initial, onDone, toast }) {
   const [intervalHours, setIntervalHours] = useState(s0.intervalHours ?? 6);
   const [intervalDays, setIntervalDays] = useState(s0.intervalDays ?? 3);
   const [cron, setCron] = useState(s0.cron || '30 3 * * *');
+  // #27：任务级高级选项。老任务没有这些字段时：编辑保持「全关/不限」的现状；
+  // 全新任务则给推荐默认（安全阀 100 个 / 30%，其余关），用户可改可关。
+  const isNew = !initial?.id;
+  const [verOn, setVerOn] = useState(!!initial?.versioning?.enabled);
+  const [keepDays, setKeepDays] = useState(initial?.versioning?.keepDays ?? 30);
+  const [mdCount, setMdCount] = useState(initial?.maxDelete ? (initial.maxDelete.count ?? 0) : (isNew ? 100 : 0));
+  const [mdPercent, setMdPercent] = useState(initial?.maxDelete ? (initial.maxDelete.percent ?? 0) : (isNew ? 30 : 0));
+  const [bwlimit, setBwlimit] = useState(initial?.bwlimit || '');
+  const [trackRenames, setTrackRenames] = useState(!!initial?.trackRenames);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
@@ -118,6 +127,10 @@ function TaskForm({ remotes, initial, onDone, toast }) {
     }
     if (schedType === 'weekly' && weekdays.length === 0) { setErr('每周方式至少要选一个星期'); return; }
     if (schedType === 'cron' && cron.trim().split(/\s+/).length !== 5) { setErr('cron 表达式要是五段：分 时 日 月 周，例如 30 3 * * *'); return; }
+    if (verOn && (!Number.isFinite(Number(keepDays)) || Number(keepDays) < 1 || Number(keepDays) > 3650)) { setErr('旧版本保留天数要在 1 到 3650 之间'); return; }
+    if (!Number.isFinite(Number(mdCount)) || Number(mdCount) < 0) { setErr('安全阀的删除文件数上限不能是负数（0 表示不限）'); return; }
+    if (!Number.isFinite(Number(mdPercent)) || Number(mdPercent) < 0 || Number(mdPercent) > 100) { setErr('安全阀的删除比例要在 0（不限）到 100 之间'); return; }
+    if (bwlimit.trim() && !/^\d+(\.\d+)?\s*[kKmMgGtT]?[bB]?$/.test(bwlimit.trim())) { setErr('限速格式不对：填数字加单位，如 500k（约 500 KB/秒）、5M（约 5 MB/秒）；留空表示不限速'); return; }
     setSaving(true);
     const schedule = { type: schedType, time };
     if (schedType === 'weekly') schedule.weekdays = weekdays;
@@ -129,7 +142,11 @@ function TaskForm({ remotes, initial, onDone, toast }) {
       name: name.trim() || `${srcRemote} → ${dstRemote}`,
       srcRemote, dstRemote,
       pairs: pairs.map(({ src, dst, filters }) => ({ src, dst, filters: cleanPairFilters(filters) })),
-      schedule
+      schedule,
+      versioning: { enabled: verOn, keepDays: Number(keepDays) || 30 },
+      maxDelete: { count: Math.trunc(Number(mdCount) || 0), percent: Math.trunc(Number(mdPercent) || 0) },
+      bwlimit: bwlimit.trim(),
+      trackRenames
     };
     try {
       if (initial?.id) await api.put(`/tasks/${initial.id}`, body);
@@ -313,6 +330,49 @@ function TaskForm({ remotes, initial, onDone, toast }) {
           )}
         </div>
       </div>
+      <div className="adv-box">
+        <div className="adv-title">数据安全与高级选项 <span className="hint">（都可不设；老任务默认全关、不限）</span></div>
+        <div className="adv-row">
+          <label className="adv-check">
+            <input type="checkbox" checked={verOn} onChange={(e) => setVerOn(e.target.checked)} />
+            旧版本保留
+            <HelpTip text="开启后，被覆盖或被删除的文件不会直接消失：先移进目标文件夹里的 .rclona-archive/日期 归档区，保留若干天后自动清理。误删、源被清空时能从归档里捞回来。归档区不在镜像范围内、不会被同步删掉；代价是多占一点目标空间。" />
+          </label>
+          {verOn && (
+            <span className="adv-inline">保留
+              <input className="input" type="number" min="1" max="3650" style={{ width: 84 }} value={keepDays}
+                onChange={(e) => setKeepDays(e.target.value)} /> 天
+            </span>
+          )}
+        </div>
+        <div className="adv-row">
+          <span className="adv-label">删除安全阀
+            <HelpTip text="防误删的保险：如果一次备份要删掉的文件超过上限，就直接中止并给你发 Telegram 通知，一个文件都不会删。两个上限哪个先到都算触发；填 0 表示这一项不限。比如源被某个 App 清空、或路径配错时，它能拦住「把目标的好副本也删光」。" />
+          </span>
+          <span className="adv-inline">最多删
+            <input className="input" type="number" min="0" style={{ width: 96 }} value={mdCount}
+              onChange={(e) => setMdCount(e.target.value)} /> 个文件，
+          </span>
+          <span className="adv-inline">或超过目标现有文件的
+            <input className="input" type="number" min="0" max="100" style={{ width: 76 }} value={mdPercent}
+              onChange={(e) => setMdPercent(e.target.value)} /> %
+          </span>
+        </div>
+        <div className="adv-row">
+          <span className="adv-label">同步限速
+            <HelpTip text="限制这个任务同步时的最高速度，保护服务器带宽和弱网。写法：数字+单位，如 500k（约 500 KB/秒）、5M（约 5 MB/秒）；留空不限速。注意：面板全局共用一个限速开关，两个任务同时跑时以正在同步的那个为准。" />
+          </span>
+          <input className="input" style={{ width: 170 }} value={bwlimit} placeholder="留空不限，如 5M"
+            onChange={(e) => setBwlimit(e.target.value)} />
+        </div>
+        <div className="adv-row">
+          <label className="adv-check">
+            <input type="checkbox" checked={trackRenames} onChange={(e) => setTrackRenames(e.target.checked)} />
+            改名识别（不重传）
+            <HelpTip text="开启后，源里改了名的文件会在目标里直接改名，不重新上传一份，适合经常改名的文件夹。代价：每次同步要多一轮指纹比对；目标网盘不支持时会自动退回重传，不影响备份结果。" />
+          </label>
+        </div>
+      </div>
       <div className="note-box" style={{ marginTop: 16 }}>
         同步方式为<strong>纯镜像</strong>：目标网盘会与源保持完全一致 —— 源里新增/修改的文件会同步过去，
         <strong>源里删除的文件，目标里也会被删除</strong>。比对使用校验和，改过的文件不会漏传。
@@ -324,11 +384,24 @@ function TaskForm({ remotes, initial, onDone, toast }) {
   );
 }
 
+function PreviewList({ title, color, files }) {
+  if (!files?.length) return null;
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div style={{ fontSize: 13, fontWeight: 600, color }}>{title}（{files.length}）</div>
+      <div className="pv-list">
+        {files.map((f) => <div key={f} className="pv-item">{f}</div>)}
+      </div>
+    </div>
+  );
+}
+
 export default function Tasks({ toast }) {
   const [tasks, setTasks] = useState(null);
   const [remotes, setRemotes] = useState([]);
   const [editing, setEditing] = useState(undefined); // undefined=关, null=新建, obj=编辑
   const [runningId, setRunningId] = useState('');
+  const [preview, setPreview] = useState(null); // { task, loading, data, error }
 
   async function load() {
     try {
@@ -356,6 +429,15 @@ export default function Tasks({ toast }) {
     } catch (e) { toast(e.message, true); }
     setRunningId('');
     load();
+  }
+  async function runPreview(task) {
+    setPreview({ task, loading: true, data: null, error: '' });
+    try {
+      const d = await api.post(`/tasks/${task.id}/preview`);
+      setPreview({ task, loading: false, data: d.preview, error: '' });
+    } catch (e) {
+      setPreview({ task, loading: false, data: null, error: e.message });
+    }
   }
 
   return (
@@ -404,6 +486,9 @@ export default function Tasks({ toast }) {
                 <input type="checkbox" checked={t.enabled} onChange={() => toggle(t)} />
                 <span className="track" />
               </label>
+              <button className="btn btn-ghost btn-sm" disabled={t.lastStatus === 'running'} onClick={() => runPreview(t)}>
+                试运行
+              </button>
               <button className="btn btn-primary btn-sm" disabled={runningId === t.id || t.lastStatus === 'running'} onClick={() => runNow(t)}>
                 {t.lastStatus === 'running'
                   ? <><span className="spin" style={{ width: 13, height: 13, borderWidth: 2 }} /> 执行中…</>
@@ -420,6 +505,37 @@ export default function Tasks({ toast }) {
         <Modal title={editing ? '编辑备份任务' : '新建备份任务'} sub="选好源和目标，再定个时间，剩下的交给它" wide onClose={() => setEditing(undefined)}>
           <TaskForm remotes={remotes} initial={editing} toast={toast}
             onDone={() => { setEditing(undefined); load(); }} />
+        </Modal>
+      )}
+
+      {preview && (
+        <Modal title={`试运行：${preview.task.name}`} sub="只比对、不动任何文件：下面是现在真跑一次将会发生的变化" wide onClose={() => setPreview(null)}>
+          {preview.loading && <div className="loading-page"><span className="spin" /> 正在比对两边文件…</div>}
+          {preview.error && <div className="login-err">{preview.error}</div>}
+          {preview.data && preview.data.pairs.map((p, i) => (
+            <div key={i} style={{ marginBottom: 18 }}>
+              <div style={{ fontWeight: 700, fontSize: 14.5, wordBreak: 'break-all' }}>
+                {preview.data.pairs.length > 1 ? `第 ${i + 1} 组：` : ''}{p.src} → {p.dst}
+              </div>
+              {p.error ? (
+                <div style={{ color: 'var(--red-dark)', fontSize: 13.5, marginTop: 6 }}>这一组比对失败：{p.error}</div>
+              ) : (
+                <>
+                  <div style={{ fontSize: 13.5, color: 'var(--text-2)', marginTop: 4 }}>
+                    将新增 <b>{p.counts.added}</b> 个 · 将更新 <b>{p.counts.updated}</b> 个 · 将删除 <b style={{ color: 'var(--red-dark)' }}>{p.counts.deleted}</b> 个
+                    {p.counts.added + p.counts.updated + p.counts.deleted === 0 && '（两边已经一致，真跑也不会动任何文件）'}
+                  </div>
+                  <PreviewList title="将新增" color="var(--green-dark, #1d7a3a)" files={p.added} />
+                  <PreviewList title="将更新" color="#b97d1e" files={p.updated} />
+                  <PreviewList title="将删除" color="var(--red-dark)" files={p.deleted} />
+                  {p.truncated && <div style={{ fontSize: 12.5, color: 'var(--text-3)', marginTop: 6 }}>清单太长，每类只显示前 200 条，计数是全量。</div>}
+                </>
+              )}
+            </div>
+          ))}
+          {preview.data && (
+            <div className="note-box">试运行只是预演：没有改动目标网盘的任何文件，也不会留下运行记录。确认清单没问题，再点「立即执行」真跑。</div>
+          )}
         </Modal>
       )}
     </div>

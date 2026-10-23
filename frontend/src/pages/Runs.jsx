@@ -3,6 +3,38 @@ import { api } from '../api.js';
 import { BigStatus, RunStatusWord, StageChain, Icon } from '../components.jsx';
 import { fmtTimeSec, fmtDuration, fmtBytes } from '../util.js';
 
+// #27：一次运行的变更明细（新增/更新/删除三类清单），默认折叠；老记录没有这个字段时不渲染。
+function ChangesBlock({ changes, label }) {
+  const [open, setOpen] = useState(false);
+  if (!changes) return null;
+  const groups = [
+    ['added', '新增', 'var(--green-dark, #1d7a3a)'],
+    ['updated', '更新', '#b97d1e'],
+    ['deleted', '删除', 'var(--red-dark)']
+  ];
+  const cnt = (k) => changes.counts?.[k] ?? changes[k]?.length ?? 0;
+  return (
+    <div style={{ marginTop: 10 }}>
+      <button className="btn btn-ghost btn-sm" onClick={() => setOpen(!open)} style={{ paddingLeft: 0 }}>
+        {open ? '▾' : '▸'} {label ? `${label} · ` : ''}变更明细：新增 {cnt('added')} · 更新 {cnt('updated')} · 删除 {cnt('deleted')}
+      </button>
+      {open && (
+        <div style={{ marginTop: 4 }}>
+          {groups.map(([k, zh, color]) => (changes[k]?.length > 0 && (
+            <div key={k} style={{ marginTop: 6 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 600, color }}>{zh}（{changes[k].length}）</div>
+              <div className="pv-list">
+                {changes[k].map((f) => <div key={f} className="pv-item">{f}</div>)}
+              </div>
+            </div>
+          )))}
+          {changes.truncated && <div style={{ fontSize: 12, color: 'var(--text-3)', marginTop: 4 }}>清单太长，每类只记录前 500 条；上方计数是全量。</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function runSummary(run) {
   if (run.status === 'running') return '正在备份中…';
   if (run.status === 'skipped') return run.reasonZh || '已跳过';
@@ -52,6 +84,10 @@ export function RunRow({ run, onHandled, showTask = true, highlighted = false })
               {run.handledAt && <> · 已于 {fmtTimeSec(run.handledAt)} 标记为已处理</>}
             </div>
             <StageChain stages={run.stages} />
+            {/* #27 变更明细：多组任务看各组自己的，单组任务看运行级聚合；老记录无字段自动跳过 */}
+            {(run.pairs?.length > 1)
+              ? run.pairs.map((p, i) => p.changes && <ChangesBlock key={i} changes={p.changes} label={`第 ${i + 1} 组`} />)
+              : <ChangesBlock changes={run.changes} />}
             {run.status === 'failed' && run.reasonZh && (
               <div style={{ color: 'var(--red-dark)', fontSize: 13.5, marginTop: 6 }}>
                 详细原因：{run.failedStageLabel ? `卡在「${run.failedStageLabel}」阶段——` : ''}{run.reasonZh}

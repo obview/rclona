@@ -3,6 +3,7 @@ import { rc, fsSpec } from './rc.js';
 import { stageReason, classifyError } from './classify.js';
 import { notifyBackupFailure, notifyFirstScheduledSuccess } from './notifier.js';
 import { pairFilterRules, escapeFilterLiteral } from './filters.js';
+import { taskOptionsOf } from './taskopts.js';
 import { cfg } from './config.js';
 
 // 备份执行：固定五阶段。先做飞行前检查（把失败定位到阶段），再跑真正的 sync，最后校验
@@ -75,12 +76,83 @@ export async function findPlaceholderPaths(fs) {
   return out;
 }
 
+// #27：旧版本保留的归档区目录名（位于每组目标文件夹内部，随该组一起被过滤排除在镜像之外）
+export const ARCHIVE_DIR = '.rclona-archive';
+
+// 面板时区下的日期串（YYYY-MM-DD），daysAgo=0 为今天
+function dateStrInTz(daysAgo = 0) {
+  return new Date(Date.now() - daysAgo * 86400000).toLocaleDateString('en-CA', { timeZone: cfg.tz });
+}
+
+// 变更明细（#27）：operations/check 的三份名单就是「将新增/将更新/将删除」，
+// 与真实运行、试运行预览共用同一来源，口径一致。每类封顶 cap 条，超出置 truncated。
+export const CHANGES_CAP = 500;
+export function changesFromCheck(chk, cap = CHANGES_CAP) {
+  const one = (arr) => ({ list: (arr || []).slice(0, cap), total: (arr || []).length });
+  const a = one(chk?.missingOnDst), u = one(chk?.differ), d = one(chk?.missingOnSrc);
+  return {
+    added: a.list, updated: u.list, deleted: d.list,
+    counts: { added: a.total, updated: u.total, deleted: d.total },
+    truncated: a.total > cap || u.total > cap || d.total > cap
+  };
+}
+
+// 目标端现有文件数（删除安全阀的「比例」分母；归档区不算，它不在镜像删除范围内）
+async function dstFileCount(dstFs) {
+  const { list } = await rc.listAll(dstFs);
+  return (list || []).filter((it) => !it.IsDir && !String(it.Path || '').startsWith(`${ARCHIVE_DIR}/`)).length;
+}
+
+// 计算一组映射的完整过滤规则：系统自动排除（/host 虚拟目录、#18 空占位、#27 归档区）
+// 永远在前，用户规则（#26）在后——用户规则不能把系统排除的内容放回来。
+// 真实同步、校验、同步前比对、试运行预览四处共用同一份，保证口径一致。
+async function computePairFilters({ task, pair, srcFs, log }) {
+  const opts = taskOptionsOf(task);
+  const hostPatterns = await hostExcludesFor(task.srcRemote, pair.src).catch(() => null);
+  const autoFilterRules = (hostPatterns || []).map((p) => `- ${p}`);
+  const skipTopDirs = hostPatterns ? new Set(HOST_VIRTUAL_DIRS) : null;
+  if (hostPatterns) log(`源是服务器根目录（${HOST_MOUNT}），已自动排除系统虚拟目录：${HOST_VIRTUAL_DIRS.join('、')}`);
+  // #27：开了旧版本保留时，目标里的归档区必须对镜像隐身——否则下一轮同步会把归档当「多余文件」删掉
+  if (opts.versioning.enabled) autoFilterRules.push(`- /${ARCHIVE_DIR}/**`);
+  // #18：识别同名空占位并逐个精确排除
+  try {
+    const placeholders = await findPlaceholderPaths(srcFs);
+    if (placeholders.length) {
+      autoFilterRules.push(...placeholders.map((p) => `- /${escapeFilterLiteral(p)}`));
+      log(`已自动跳过 ${placeholders.length} 个空占位对象（0 字节、与文件夹同名）：${placeholders.join('、')}`);
+    }
+  } catch (e) {
+    log(`空占位对象检测未完成（${e.message}），按原样继续同步`);
+  }
+  const filterRules = [...autoFilterRules, ...pairFilterRules(pair.filters)];
+  if (pair.filters?.length) log(`本组已启用 ${pair.filters.length} 条文件筛选规则`);
+  return { filterRules, skipTopDirs };
+}
+
+// #27：清理某组归档区里超过保留天数的日期目录；归档区不存在/清理失败都不算错（返回已清个数）
+async function cleanupArchive(dstRemote, pair, keepDays) {
+  const rel = pair.dst ? `${pair.dst}/${ARCHIVE_DIR}` : ARCHIVE_DIR;
+  const archiveFs = fsSpec(dstRemote, rel);
+  let entries;
+  try { entries = (await rc.list(archiveFs, '')).list || []; }
+  catch { return 0; }
+  const cutoff = dateStrInTz(keepDays); // 日期早于 cutoff 的归档已超保留期
+  let n = 0;
+  for (const it of entries) {
+    if (!it.IsDir || !/^\d{4}-\d{2}-\d{2}$/.test(it.Name)) continue;
+    if (it.Name < cutoff) { await rc.purge(archiveFs, it.Name); n++; }
+  }
+  return n;
+}
+
 // 一组映射的五阶段执行（#25）：逻辑与单组时代完全一致，只是失败不再直接终结整次运行，
 // 而是把结果交回 runTask 聚合——一组失败，后面的组照常继续跑。
 // stages/stats 是本组私有的记录格，onProgress 回调把聚合结果刷进运行记录（供界面实时看）。
 async function runPair({ task, pair, log, stages, stats, onProgress }) {
+  const opts = taskOptionsOf(task);
   const srcFs = fsSpec(task.srcRemote, pair.src);
   const dstFs = fsSpec(task.dstRemote, pair.dst);
+  let pairChanges = null; // #27 变更明细（同步前比对得出），挂到本组结果上
   const setStage = (i, status, durationMs) => {
     stages[i].status = status;
     if (durationMs != null) stages[i].durationMs = durationMs;
@@ -89,14 +161,11 @@ async function runPair({ task, pair, log, stages, stats, onProgress }) {
   const failAt = (stageIdx, errText) => {
     const { reasonZh } = stageReason(STAGES[stageIdx].label, errText);
     setStage(stageIdx, 'failed');
-    return { ok: false, stageIdx, reasonZh, errText: String(errText) };
+    return { ok: false, stageIdx, reasonZh, errText: String(errText), changes: pairChanges };
   };
   try {
-    // #14：本组源是宿主机根目录（/host）时，自动排除系统虚拟目录（扫描/同步/校验全程一致）
-    const hostPatterns = await hostExcludesFor(task.srcRemote, pair.src).catch(() => null);
-    let autoFilterRules = (hostPatterns || []).map((p) => `- ${p}`);
-    const skipTopDirs = hostPatterns ? new Set(HOST_VIRTUAL_DIRS) : null;
-    if (hostPatterns) log(`源是服务器根目录（${HOST_MOUNT}），已自动排除系统虚拟目录：${HOST_VIRTUAL_DIRS.join('、')}`);
+    // 过滤规则先算好（#14 /host 排除、#18 空占位、#26 用户筛选、#27 归档区隐身，合并口径见 computePairFilters）
+    const { filterRules, skipTopDirs } = await computePairFilters({ task, pair, srcFs, log });
 
     // 阶段 1：连接源网盘
     let t0 = Date.now();
@@ -140,27 +209,59 @@ async function runPair({ task, pair, log, stages, stats, onProgress }) {
     setStage(2, 'ok', Date.now() - t0);
     log('目标网盘连接正常');
 
-    // #18：识别同名空占位并逐个精确排除；#26：再把本组用户筛选翻译成 FilterRule。
-    // 合并顺序固定：系统自动排除（/host、空占位）在前，用户规则在后，任何用户规则
-    // 都不能把系统已排除的内容又放回来；同一份合并规则传给 sync 与 check。
+    // 同步前比对（#27）：与阶段 5 同一个 operations/check，先算清这次「将要」变更什么——
+    // ① 得出变更明细记进运行记录；② 删除安全阀按将删数量把关，超限在真同步开始前就拦下，
+    // 一个文件都不会删（不用 rclone 的 --max-delete：实测它是删到上限才报错的事后闸）。
+    // 比对本身失败不阻断备份（记日志、明细留空、安全阀跳过把关）。
     try {
-      const placeholders = await findPlaceholderPaths(srcFs);
-      if (placeholders.length) {
-        autoFilterRules.push(...placeholders.map((p) => `- /${escapeFilterLiteral(p)}`));
-        log(`已自动跳过 ${placeholders.length} 个空占位对象（0 字节、与文件夹同名）：${placeholders.join('、')}`);
-      }
+      const pre = await rc.check(srcFs, dstFs, filterRules);
+      pairChanges = changesFromCheck(pre);
     } catch (e) {
-      log(`空占位对象检测未完成（${e.message}），按原样继续同步`);
+      log(`同步前比对未完成（${e.message}），直接同步；本次变更明细可能不完整`);
     }
-    const filterRules = [...autoFilterRules, ...pairFilterRules(pair.filters)];
-    if (pair.filters?.length) log(`本组已启用 ${pair.filters.length} 条文件筛选规则`);
+    if (pairChanges && (opts.maxDelete.count > 0 || opts.maxDelete.percent > 0)) {
+      const limits = [];
+      if (opts.maxDelete.count > 0) limits.push(opts.maxDelete.count);
+      if (opts.maxDelete.percent > 0) {
+        try {
+          const total = await dstFileCount(dstFs);
+          if (total > 0) limits.push(Math.floor((total * opts.maxDelete.percent) / 100));
+        } catch (e) { log(`安全阀的比例上限未生效（数不清目标现有文件数：${e.message}）`); }
+      }
+      if (limits.length) {
+        const limit = Math.min(...limits);
+        const wouldDelete = pairChanges.counts.deleted;
+        if (wouldDelete > limit) {
+          setStage(3, 'failed');
+          const reasonZh = `本次要删除 ${wouldDelete} 个文件，超过删除安全阀上限 ${limit} 个，已中止以防误删（先点任务的「试运行」看清将删清单，确认无误后到任务设置里调高或关闭安全阀）`;
+          log(`删除安全阀拦下本次同步：${reasonZh}`);
+          return { ok: false, stageIdx: 3, guardTrip: { wouldDelete, limit }, reasonZh, errText: `安全阀拦截：${reasonZh}`, changes: pairChanges };
+        }
+      }
+    }
 
     // 阶段 4：真正传输（rc sync 异步任务，轮询状态）
     t0 = Date.now();
     setStage(3, 'running');
+    // #27 单次调用级配置：BackupDir（被覆盖/删除的文件先进归档区）、TrackRenames（改名不重传）
+    const syncCfg = {};
+    const archiveDate = dateStrInTz(0);
+    if (opts.versioning.enabled) syncCfg.BackupDir = `${dstFs}/${ARCHIVE_DIR}/${archiveDate}`;
+    if (opts.trackRenames) syncCfg.TrackRenames = true;
     let jobid;
-    try { jobid = await rc.syncAsync(srcFs, dstFs, filterRules); }
+    try { jobid = await rc.syncAsync(srcFs, dstFs, filterRules, syncCfg); }
     catch (e) { return failAt(3, e.message); }
+    // #27 限速：_config 的 BwLimit 在 rcd 下实测不生效，只能拨全局开关——
+    // 记住原值，同步一结束（成功/失败/超时都算）立刻恢复，避免影响别的任务与自检。
+    let bwRestore = null;
+    if (opts.bwlimit) {
+      try {
+        const cur = await rc.bwlimitGet();
+        bwRestore = cur?.bytesPerSecond > 0 ? String(cur.bytesPerSecond) : 'off';
+        await rc.bwlimitSet(opts.bwlimit);
+        log(`已启用同步限速：${opts.bwlimit}（本任务同步期间有效）`);
+      } catch (e) { log(`限速未生效（${e.message}），按不限速继续`); bwRestore = null; }
+    }
     // 把这次同步的统计搬进本组统计：成功时是最终账，失败/超时时是「已传部分」的如实账（#18，不再记 0）
     const pullJobStats = async () => {
       try {
@@ -168,22 +269,34 @@ async function runPair({ task, pair, log, stages, stats, onProgress }) {
         stats.transferred = st.transfers ?? 0;
         stats.bytes = st.bytes ?? 0;
         stats.deletes = st.deletes ?? 0;
+        if (typeof st.renames === 'number') stats.renames = st.renames;
         if (typeof st.checks === 'number') stats.checked = Math.max(stats.checked || 0, st.checks);
         onProgress();
       } catch { /* 统计拿不到不影响结果 */ }
     };
     const deadline = Date.now() + cfg.runTimeoutMs;
     let job = null;
+    let timedOut = false;
     for (;;) {
       await new Promise((r) => setTimeout(r, 1500));
       try { job = await rc.jobStatus(jobid); } catch { continue; }
       if (job.finished) break;
-      if (Date.now() > deadline) { await pullJobStats(); return failAt(3, '同步超时（超过设定时长仍未完成）'); }
+      if (Date.now() > deadline) { timedOut = true; break; }
     }
+    if (bwRestore !== null) {
+      try { await rc.bwlimitSet(bwRestore); } catch { /* 恢复失败不影响备份结果 */ }
+      bwRestore = null;
+    }
+    if (timedOut) { await pullJobStats(); return failAt(3, '同步超时（超过设定时长仍未完成）'); }
     if (!job.success) { await pullJobStats(); return failAt(3, job.error || '同步任务失败'); }
     await pullJobStats();
     setStage(3, 'ok', Date.now() - t0);
     log(`传输完成：同步了 ${stats.transferred ?? 0} 个文件`);
+    if (stats.renames) log(`其中 ${stats.renames} 个文件只是改了名字（已在目标直接改名，没有重传）`);
+    if (opts.versioning.enabled && pairChanges) {
+      const archived = pairChanges.counts.updated + pairChanges.counts.deleted;
+      if (archived > 0) log(`被覆盖/删除的 ${archived} 个文件已先移入归档区（${pair.dst ? `${pair.dst}/` : ''}${ARCHIVE_DIR}/${archiveDate}），保留 ${opts.versioning.keepDays} 天后自动清理`);
+    }
 
     // 阶段 5：校验（rclone check 复核两边一致性）
     t0 = Date.now();
@@ -204,7 +317,7 @@ async function runPair({ task, pair, log, stages, stats, onProgress }) {
     }
     setStage(4, 'ok', Date.now() - t0);
     log('校验通过：两边文件一致');
-    return { ok: true };
+    return { ok: true, changes: pairChanges };
   } catch (e) {
     // 兜底：阶段外异常按当前运行中阶段归因
     const idx = stages.findIndex((s) => s.status === 'running');
@@ -285,7 +398,7 @@ export async function runTask(task, trigger = 'manual') {
     });
     const agg = {};
     for (const ps of pairStats) {
-      for (const k of ['transferred', 'bytes', 'deletes', 'checked']) {
+      for (const k of ['transferred', 'bytes', 'deletes', 'checked', 'renames']) {
         if (typeof ps[k] === 'number') agg[k] = (agg[k] || 0) + ps[k];
       }
     }
@@ -312,7 +425,8 @@ export async function runTask(task, trigger = 'manual') {
       failedStage: r.ok ? -1 : r.stageIdx,
       failedStageLabel: r.ok ? '' : STAGES[r.stageIdx].label,
       reasonZh: r.ok ? '' : r.reasonZh,
-      stats: { ...pairStats[i] }
+      stats: { ...pairStats[i] },
+      changes: r.changes || null
     });
     if (!r.ok) {
       failures.push({ idx: i, srcFs, dstFs, ...r });
@@ -321,6 +435,32 @@ export async function runTask(task, trigger = 'manual') {
     persistProgress();
   }
   run.pairs = pairResults;
+
+  // #27：运行级变更明细 = 各组明细的聚合（每类仍封顶 500 条，计数是全量）
+  const withChanges = pairResults.filter((p) => p.changes);
+  if (withChanges.length) {
+    const agg = { added: [], updated: [], deleted: [], counts: { added: 0, updated: 0, deleted: 0 }, truncated: false };
+    for (const p of withChanges) {
+      for (const k of ['added', 'updated', 'deleted']) {
+        agg.counts[k] += p.changes.counts[k];
+        for (const f of p.changes[k]) if (agg[k].length < CHANGES_CAP) agg[k].push(f);
+      }
+      if (p.changes.truncated) agg.truncated = true;
+    }
+    for (const k of ['added', 'updated', 'deleted']) if (agg[k].length < agg.counts[k]) agg.truncated = true;
+    run.changes = agg;
+  }
+
+  // #27：开了旧版本保留的任务，每次运行后顺带清理过期归档（失败只记日志，不影响备份结果）
+  const taskOpts = taskOptionsOf(task);
+  if (taskOpts.versioning.enabled) {
+    for (const pair of pairs) {
+      try {
+        const n = await cleanupArchive(task.dstRemote, pair, taskOpts.versioning.keepDays);
+        if (n > 0) log(`已清理 ${n} 个过期归档（超过 ${taskOpts.versioning.keepDays} 天）`);
+      } catch (e) { log(`归档清理未完成（${e.message}），下次运行时再试`); }
+    }
+  }
 
   if (failures.length) {
     const f0 = failures[0];
@@ -362,4 +502,51 @@ export async function runTask(task, trigger = 'manual') {
     notifyFirstScheduledSuccess(run, tt).catch(() => {});
   }
   return run;
+}
+
+// #27 试运行预览：只比对、绝不动目标——不建目录、不落运行记录、不发通知。
+// 每组先算与真实运行完全相同的过滤规则，再跑 operations/check 得将变更清单
+// （新增=目标缺失、更新=内容不同、删除=源里没有；与真实运行的变更明细同源同口径），
+// 另跑一次 DryRun 的 sync 拿计数交叉核对（清单以 check 为准，计数对不上时以清单为准展示）。
+const PREVIEW_CAP = 200;
+export async function previewTask(task) {
+  const pairs = pairsOf(task);
+  const out = [];
+  for (const pair of pairs) {
+    const srcFs = fsSpec(task.srcRemote, pair.src);
+    const dstFs = fsSpec(task.dstRemote, pair.dst);
+    const item = {
+      src: srcFs, dst: dstFs,
+      added: [], updated: [], deleted: [],
+      counts: { added: 0, updated: 0, deleted: 0 },
+      truncated: false, dryRun: null, error: ''
+    };
+    try {
+      const sink = [];
+      const { filterRules } = await computePairFilters({ task, pair, srcFs, log: (m) => sink.push(m) });
+      const chk = await rc.check(srcFs, dstFs, filterRules);
+      const ch = changesFromCheck(chk, PREVIEW_CAP);
+      item.added = ch.added; item.updated = ch.updated; item.deleted = ch.deleted;
+      item.counts = ch.counts; item.truncated = ch.truncated;
+      try {
+        const jobid = await rc.syncAsync(srcFs, dstFs, filterRules, { DryRun: true });
+        const deadline = Date.now() + 10 * 60 * 1000;
+        let job = null;
+        for (;;) {
+          await new Promise((r) => setTimeout(r, 1000));
+          job = await rc.jobStatus(jobid).catch(() => null);
+          if (job?.finished) break;
+          if (Date.now() > deadline) break;
+        }
+        if (job?.finished && job.success) {
+          const st = await rc.stats(`job/${jobid}`);
+          item.dryRun = { transfers: st.totalTransfers ?? st.transfers ?? 0, deletes: st.deletes ?? 0 };
+        }
+      } catch { /* 交叉核对拿不到不影响清单本身 */ }
+    } catch (e) {
+      item.error = classifyError(e.message).reasonZh;
+    }
+    out.push(item);
+  }
+  return { pairs: out };
 }

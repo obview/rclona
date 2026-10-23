@@ -12,10 +12,11 @@ import {
 import { rc, normalizeProviders, fsSpec } from './rc.js';
 import { classifyError } from './classify.js';
 import { healthOf, testRemote } from './health.js';
-import { runTask, isRunning } from './runner.js';
+import { runTask, isRunning, previewTask } from './runner.js';
 import { sendTestTelegram } from './notifier.js';
 import { normalizeSchedule, nextSlotAfter, validateCron, validHM } from './schedule.js';
 import { normalizePairFilters } from './filters.js';
+import { normalizeTaskOptionsInput } from './taskopts.js';
 import { nextHealthCheckAt } from './scheduler.js';
 
 const SERVER_STARTED_AT = new Date().toISOString();
@@ -286,7 +287,7 @@ export function createServer() {
           store.save();
           return sendJson(res, 200, { task });
         }
-        const taskMatch = p.match(/^\/api\/tasks\/([^/]+)(?:\/(run|toggle))?$/);
+        const taskMatch = p.match(/^\/api\/tasks\/([^/]+)(?:\/(run|toggle|preview))?$/);
         if (taskMatch) {
           const id = taskMatch[1];
           const task = store.data.tasks.find((x) => x.id === id);
@@ -324,6 +325,12 @@ export function createServer() {
             if (isRunning(id)) return sendJson(res, 409, { error: '这个任务正在执行中' });
             runTask(task, 'manual').catch((e) => console.error('[api] 手动执行异常：', e.message));
             return sendJson(res, 200, { started: true });
+          }
+          if (req.method === 'POST' && taskMatch[2] === 'preview') {
+            // #27 试运行：只比对不动数据（不落记录、不发通知），任务正在跑时先拒绝，避免清单是半成品状态
+            if (isRunning(id)) return sendJson(res, 409, { error: '这个任务正在执行中，等它跑完再试运行' });
+            const preview = await previewTask(task);
+            return sendJson(res, 200, { preview });
           }
         }
 
@@ -448,6 +455,8 @@ function validateTask(b) {
       throw new Error(`第 ${i + 1} 组的源和目标是同一个位置，换一个目标文件夹`);
     }
   });
+  // #27：任务级高级选项（旧版本保留/删除安全阀/限速/改名识别）；老客户端不传 = 全默认（行为不变）
+  const options = normalizeTaskOptionsInput(b);
   return {
     name: name || `${srcRemote} → ${dstRemote}`,
     srcRemote,
@@ -455,6 +464,10 @@ function validateTask(b) {
     dstRemote,
     dstPath: pairs[0].dst,
     pairs,
-    schedule
+    schedule,
+    versioning: options.versioning,
+    maxDelete: options.maxDelete,
+    bwlimit: options.bwlimit,
+    trackRenames: options.trackRenames
   };
 }

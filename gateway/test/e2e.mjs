@@ -1041,6 +1041,203 @@ async function main() {
     ok(/已自动跳过 2 个空占位对象/.test(fltRun4.logExcerpt || ''),
       '日志仍注明自动跳过的空占位数量');
 
+    console.log('== 20. #27 A 段：旧版本保留 / 删除安全阀 / 试运行 / 变更明细 / 限速 / 改名 ==');
+    const today27 = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
+    const mkTask27 = async (body) => {
+      const made = await api('POST', '/api/tasks', body);
+      if (made.status !== 200) throw new Error(`#27 任务创建失败：${JSON.stringify(made.data)}`);
+      return made.data.task;
+    };
+    const waitRun27 = async (taskId, seenIds, timeout = 90000) => waitFor(async () => {
+      const d = await api('GET', `/api/runs?taskId=${taskId}`);
+      const r = (d.data.runs || []).find((x) => !seenIds.has(x.id) && x.status !== 'running');
+      return r || null;
+    }, timeout);
+    const runNew27 = async (task) => {
+      const seen = new Set(((await api('GET', `/api/runs?taskId=${task.id}`)).data.runs || []).map((r) => r.id));
+      await api('POST', `/api/tasks/${task.id}/run`);
+      return waitRun27(task.id, seen);
+    };
+
+    // ① 旧版本保留：被覆盖/删除的文件进归档、过期归档被清、归档区不被镜像删
+    const vSrc = path.join(T, 'v27', 'src'); const vDst = path.join(T, 'v27', 'dst');
+    fs.mkdirSync(vSrc, { recursive: true });
+    fs.mkdirSync(path.join(vDst, '.rclona-archive', '2000-01-01'), { recursive: true });
+    fs.writeFileSync(path.join(vSrc, 'f.txt'), 'v1');
+    fs.writeFileSync(path.join(vSrc, 'del.txt'), 'to be deleted');
+    fs.writeFileSync(path.join(vDst, '.rclona-archive', '2000-01-01', 'old.txt'), 'ancient');
+    const verTask = await mkTask27({
+      name: '版本保留任务', srcRemote: 'tsrc', dstRemote: 'tdst',
+      pairs: [{ src: vSrc, dst: vDst }],
+      schedule: { type: 'daily', time: '04:00' },
+      versioning: { enabled: true, keepDays: 30 }
+    });
+    const verRun1 = await runNew27(verTask);
+    ok(verRun1.status === 'success', '版本保留任务第一次运行成功', `状态=${verRun1.status} ${verRun1.reasonZh || ''}`);
+    fs.writeFileSync(path.join(vSrc, 'f.txt'), 'v2');
+    fs.rmSync(path.join(vSrc, 'del.txt'));
+    fs.writeFileSync(path.join(vSrc, 'add.txt'), 'brand new');
+    const verRun2 = await runNew27(verTask);
+    ok(verRun2.status === 'success', '版本保留任务第二次运行成功', `状态=${verRun2.status} ${verRun2.reasonZh || ''}`);
+    const archDir = path.join(vDst, '.rclona-archive', today27);
+    ok(fs.existsSync(path.join(archDir, 'f.txt')) && fs.readFileSync(path.join(archDir, 'f.txt'), 'utf8') === 'v1',
+      '被覆盖的旧版 f.txt 已进当天归档（内容是旧版 v1）');
+    ok(fs.existsSync(path.join(archDir, 'del.txt')) && fs.readFileSync(path.join(archDir, 'del.txt'), 'utf8') === 'to be deleted',
+      '被删除的 del.txt 已进当天归档');
+    ok(!fs.existsSync(path.join(vDst, '.rclona-archive', '2000-01-01')), '超过保留天数的旧归档目录已被清理');
+    ok(fs.readFileSync(path.join(vDst, 'f.txt'), 'utf8') === 'v2' && !fs.existsSync(path.join(vDst, 'del.txt'))
+      && fs.readFileSync(path.join(vDst, 'add.txt'), 'utf8') === 'brand new', '目标本体仍是纯镜像结果（新版到位、删除生效、新文件到位）');
+    ok(/归档区/.test(verRun2.logExcerpt || ''), '运行日志注明了本次归档');
+    // 变更明细（第 4 项）与版本保留同跑验证：三类各一例、计数与截断标记对
+    const vc = verRun2.changes || {};
+    ok(vc.counts?.added === 1 && vc.counts?.updated === 1 && vc.counts?.deleted === 1 && vc.truncated === false,
+      '变更明细计数正确（新增 1 / 更新 1 / 删除 1，未截断）', JSON.stringify(vc.counts || {}));
+    ok((vc.added || []).includes('add.txt') && (vc.updated || []).includes('f.txt') && (vc.deleted || []).includes('del.txt'),
+      '变更明细三类清单各含预期文件');
+    const verRun3 = await runNew27(verTask);
+    ok(verRun3.status === 'success' && fs.existsSync(archDir),
+      '无变化再跑一次：归档区不被镜像同步删掉', `状态=${verRun3.status}`);
+    ok((verRun3.changes?.counts?.added ?? -1) === 0 && (verRun3.changes?.counts?.deleted ?? -1) === 0,
+      '无变化运行的变更明细计数为 0');
+
+    // ② 删除安全阀（个数上限）：超限中止、一个不删、失败原因与 Telegram 都点名安全阀
+    const gSrc = path.join(T, 'g27', 'src'); const gDst = path.join(T, 'g27', 'dst');
+    fs.mkdirSync(gSrc, { recursive: true }); fs.mkdirSync(gDst, { recursive: true });
+    fs.writeFileSync(path.join(gSrc, 'keep.txt'), 'same');
+    fs.writeFileSync(path.join(gDst, 'keep.txt'), 'same');
+    for (let i = 1; i <= 4; i++) fs.writeFileSync(path.join(gDst, `stale${i}.txt`), `stale ${i}`);
+    const guardTask = await mkTask27({
+      name: '安全阀任务', srcRemote: 'tsrc', dstRemote: 'tdst',
+      pairs: [{ src: gSrc, dst: gDst }],
+      schedule: { type: 'daily', time: '04:00' },
+      maxDelete: { count: 2, percent: 0 }
+    });
+    const guardRun = await runNew27(guardTask);
+    ok(guardRun.status === 'failed' && guardRun.failedStage === 3, '安全阀触发：任务在传输阶段标失败',
+      `状态=${guardRun.status} 阶段=${guardRun.failedStage}`);
+    ok(/安全阀/.test(guardRun.reasonZh || '') && /4 个文件/.test(guardRun.reasonZh || ''),
+      '失败原因点名删除安全阀并写清将删数量', guardRun.reasonZh || '');
+    ok([1, 2, 3, 4].every((i) => fs.existsSync(path.join(gDst, `stale${i}.txt`))),
+      '安全阀拦下后目标文件一个都没删');
+    const tgGuard = await waitFor(async () => tgHas('备份失败', '安全阀') || null, 10000).catch(() => null);
+    ok(!!tgGuard, '安全阀失败已发 Telegram 通知且文案点明安全阀');
+    // 关掉安全阀再跑：删除正常生效（证明拦的是阀、不是任务本身坏了）
+    const guardTaskNow = (await api('GET', '/api/tasks')).data.tasks.find((t) => t.id === guardTask.id);
+    const putOff = await api('PUT', `/api/tasks/${guardTask.id}`, { ...guardTaskNow, maxDelete: { count: 0, percent: 0 } });
+    ok(putOff.status === 200, '安全阀可经编辑关闭（0 = 不限）');
+    const guardRun2 = await runNew27(guardTask);
+    ok(guardRun2.status === 'success' && ![1, 2, 3, 4].some((i) => fs.existsSync(path.join(gDst, `stale${i}.txt`))),
+      '关闭安全阀后重跑成功，多余文件被正常删除');
+
+    // ③ 删除安全阀（比例上限）：目标 10 个文件、源只剩 1 个，将删 9 个 > 30% 上限 3 个
+    const pSrc = path.join(T, 'p27', 'src'); const pDst = path.join(T, 'p27', 'dst');
+    fs.mkdirSync(pSrc, { recursive: true }); fs.mkdirSync(pDst, { recursive: true });
+    fs.writeFileSync(path.join(pSrc, 'common.txt'), 'c');
+    fs.writeFileSync(path.join(pDst, 'common.txt'), 'c');
+    for (let i = 1; i <= 9; i++) fs.writeFileSync(path.join(pDst, `old${i}.txt`), `old ${i}`);
+    const pctTask = await mkTask27({
+      name: '安全阀比例任务', srcRemote: 'tsrc', dstRemote: 'tdst',
+      pairs: [{ src: pSrc, dst: pDst }],
+      schedule: { type: 'daily', time: '04:00' },
+      maxDelete: { count: 0, percent: 30 }
+    });
+    const pctRun = await runNew27(pctTask);
+    ok(pctRun.status === 'failed' && /安全阀/.test(pctRun.reasonZh || ''), '比例安全阀同样拦下（将删 9 个 > 上限 3 个）',
+      pctRun.reasonZh || '');
+    ok([1, 2, 3, 4, 5, 6, 7, 8, 9].every((i) => fs.existsSync(path.join(pDst, `old${i}.txt`))),
+      '比例安全阀拦下后目标文件完好');
+
+    // ④ 试运行预览：清单与计数对、目标分毫未动、不落记录不发通知
+    const pvSrc = path.join(T, 'pv27', 'src'); const pvDst = path.join(T, 'pv27', 'dst');
+    fs.mkdirSync(pvSrc, { recursive: true }); fs.mkdirSync(pvDst, { recursive: true });
+    fs.writeFileSync(path.join(pvSrc, 'new1.txt'), 'new');
+    fs.writeFileSync(path.join(pvSrc, 'mod.txt'), 'v2');
+    fs.writeFileSync(path.join(pvSrc, 'same.txt'), 'x');
+    fs.writeFileSync(path.join(pvDst, 'mod.txt'), 'v1');
+    fs.writeFileSync(path.join(pvDst, 'same.txt'), 'x');
+    fs.writeFileSync(path.join(pvDst, 'stale.txt'), 'stale');
+    const pvTask = await mkTask27({
+      name: '试运行任务', srcRemote: 'tsrc', dstRemote: 'tdst',
+      pairs: [{ src: pvSrc, dst: pvDst }],
+      schedule: { type: 'daily', time: '04:00' }
+    });
+    const tgBeforePv = tgMessages.length;
+    const pv = await api('POST', `/api/tasks/${pvTask.id}/preview`);
+    const pvPair = pv.data?.preview?.pairs?.[0] || {};
+    ok(pv.status === 200 && !pvPair.error, '试运行接口成功返回', pvPair.error || '');
+    ok((pvPair.added || []).includes('new1.txt') && (pvPair.updated || []).includes('mod.txt') && (pvPair.deleted || []).includes('stale.txt'),
+      '试运行清单三类各含预期文件');
+    ok(pvPair.counts?.added === 1 && pvPair.counts?.updated === 1 && pvPair.counts?.deleted === 1,
+      '试运行计数正确（新增 1 / 更新 1 / 删除 1）', JSON.stringify(pvPair.counts || {}));
+    ok(pvPair.dryRun?.transfers === 2 && pvPair.dryRun?.deletes === 1,
+      '试运行 dry-run 交叉计数一致（传输 2 / 删除 1）', JSON.stringify(pvPair.dryRun || {}));
+    ok(fs.readFileSync(path.join(pvDst, 'mod.txt'), 'utf8') === 'v1' && !fs.existsSync(path.join(pvDst, 'new1.txt'))
+      && fs.existsSync(path.join(pvDst, 'stale.txt')), '试运行没有动目标的任何文件');
+    const pvRuns = await api('GET', `/api/runs?taskId=${pvTask.id}`);
+    ok((pvRuns.data.runs || []).length === 0, '试运行不落运行记录');
+    ok(tgMessages.length === tgBeforePv, '试运行不发任何通知');
+
+    // ⑤ 限速：2MB 文件限 200k 应明显变慢；不限速任务随后恢复正常速度（证明全局开关已还原）
+    const bSrc = path.join(T, 'bw27', 'src');
+    fs.mkdirSync(bSrc, { recursive: true });
+    fs.writeFileSync(path.join(bSrc, 'big.bin'), Buffer.alloc(2 * 1024 * 1024, 5));
+    const bwTask = await mkTask27({
+      name: '限速任务', srcRemote: 'tsrc', dstRemote: 'tmem',
+      pairs: [{ src: bSrc, dst: 'bwtest' }],
+      schedule: { type: 'daily', time: '04:00' },
+      bwlimit: '200k'
+    });
+    const bwRun = await runNew27(bwTask);
+    const bwMs = new Date(bwRun.finishedAt) - new Date(bwRun.startedAt);
+    ok(bwRun.status === 'success', '限速任务运行成功', `状态=${bwRun.status} ${bwRun.reasonZh || ''}`);
+    ok(bwMs >= 5000, `限速真生效：2MB 文件限速 200k 耗时 ${Math.round(bwMs / 1000)} 秒（不限速时约 2 秒）`);
+    const bwFreeTask = await mkTask27({
+      name: '不限速任务', srcRemote: 'tsrc', dstRemote: 'tmem',
+      pairs: [{ src: bSrc, dst: 'bwtest2' }],
+      schedule: { type: 'daily', time: '04:00' }
+    });
+    const bwFreeRun = await runNew27(bwFreeTask);
+    const bwFreeMs = new Date(bwFreeRun.finishedAt) - new Date(bwFreeRun.startedAt);
+    ok(bwFreeRun.status === 'success' && bwFreeMs < bwMs - 3000,
+      `限速已还原：紧接着的不限速任务耗时 ${Math.round(bwFreeMs / 1000)} 秒`, `状态=${bwFreeRun.status}`);
+    const bwList = await rcdCall('operations/list', { fs: 'tmem:bwtest', remote: '', opt: { recurse: true } });
+    ok((bwList.list || []).some((e) => e.Path === 'big.bin' && e.Size === 2 * 1024 * 1024),
+      '限速任务的文件完整到达内存网盘');
+
+    // ⑥ 改名不重传：源改名后重跑，传输计数为 0、改名计数为 1、目标完成改名
+    const rnSrc = path.join(T, 'rn27', 'src'); const rnDst = path.join(T, 'rn27', 'dst');
+    fs.mkdirSync(rnSrc, { recursive: true }); fs.mkdirSync(rnDst, { recursive: true });
+    fs.writeFileSync(path.join(rnSrc, 'orig.txt'), 'rename me');
+    const rnTask = await mkTask27({
+      name: '改名任务', srcRemote: 'tsrc', dstRemote: 'tdst',
+      pairs: [{ src: rnSrc, dst: rnDst }],
+      schedule: { type: 'daily', time: '04:00' },
+      trackRenames: true
+    });
+    const rnRun1 = await runNew27(rnTask);
+    ok(rnRun1.status === 'success', '改名任务第一次运行成功', `状态=${rnRun1.status}`);
+    fs.renameSync(path.join(rnSrc, 'orig.txt'), path.join(rnSrc, 'renamed.txt'));
+    const rnRun2 = await runNew27(rnTask);
+    ok(rnRun2.status === 'success', '改名任务第二次运行成功', `状态=${rnRun2.status} ${rnRun2.reasonZh || ''}`);
+    ok(rnRun2.stats?.transferred === 0 && rnRun2.stats?.renames === 1,
+      '改名没有重传：传输计数 0、改名计数 1', JSON.stringify(rnRun2.stats || {}));
+    ok(fs.readFileSync(path.join(rnDst, 'renamed.txt'), 'utf8') === 'rename me' && !fs.existsSync(path.join(rnDst, 'orig.txt')),
+      '目标里文件已改名且内容一致');
+
+    // ⑦ 参数校验：坏限速、越界比例在建任务时就被拦下
+    const badBw = await api('POST', '/api/tasks', {
+      name: '坏限速', srcRemote: 'tsrc', dstRemote: 'tdst',
+      pairs: [{ src: pvSrc, dst: pvDst }], schedule: { type: 'daily', time: '04:00' }, bwlimit: 'abc!'
+    });
+    ok(badBw.status !== 200 && /限速/.test(badBw.data?.error || ''), '限速格式不对时建任务被拒并给出人话原因',
+      badBw.data?.error || `status=${badBw.status}`);
+    const badPct = await api('POST', '/api/tasks', {
+      name: '坏比例', srcRemote: 'tsrc', dstRemote: 'tdst',
+      pairs: [{ src: pvSrc, dst: pvDst }], schedule: { type: 'daily', time: '04:00' }, maxDelete: { count: 0, percent: 101 }
+    });
+    ok(badPct.status !== 200 && /安全阀|比例/.test(badPct.data?.error || ''), '安全阀比例越界时建任务被拒',
+      badPct.data?.error || `status=${badPct.status}`);
+
     console.log(failures === 0 ? '\n全部自测通过 ✅' : `\n有 ${failures} 项未通过 ❌`);
   } finally {
     gw.kill('SIGTERM');

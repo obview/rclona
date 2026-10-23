@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { normalizeSchedule } from './schedule.js';
 import { normalizePairFilters } from './filters.js';
+import { taskOptionsOf } from './taskopts.js';
 
 // 极简的 JSON 持久化：数据量很小（任务、记录、设置），整存整取 + 原子写
 const FILE = 'rclona.json';
@@ -68,6 +69,12 @@ export const store = {
           t.pairs = pairsOf(t);
           t.srcPath = t.pairs[0].src;
           t.dstPath = t.pairs[0].dst;
+          // #27：任务级高级选项补齐为规范形（老任务缺字段 = 全默认，行为与从前完全一致）
+          const o = taskOptionsOf(t);
+          t.versioning = o.versioning;
+          t.maxDelete = o.maxDelete;
+          t.bwlimit = o.bwlimit;
+          t.trackRenames = o.trackRenames;
         }
         // 累计计数：老数据没有就从已有运行记录里播种一次
         if (parsed.stats) {
