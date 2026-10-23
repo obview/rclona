@@ -390,7 +390,14 @@ export function createServer() {
           file = path.join(cfg.staticDir, 'index.html');
         }
         const ext = path.extname(file);
-        res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
+        // 缓存策略（#22）：入口 HTML（根路径与 SPA 回退）一律 no-cache，每次用前向服务器校验，
+        // 避免发新版后浏览器还拿着旧 index.html 连带旧 bundle；/assets/ 下是 vite 带内容哈希的
+        // 产物（文件名变即内容变），可放心长缓存 immutable；其余静态文件同样 no-cache
+        // （目前 dist 里没有这类独立文件，favicon 是入口页内联的 data URI）。
+        const cacheControl = path.basename(file) !== 'index.html' && p.startsWith('/assets/')
+          ? 'public, max-age=31536000, immutable'
+          : 'no-cache';
+        res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream', 'Cache-Control': cacheControl });
         return res.end(fs.readFileSync(file));
       }
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
