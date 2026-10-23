@@ -7,19 +7,20 @@ import Tasks from './pages/Tasks.jsx';
 import Runs from './pages/Runs.jsx';
 import Remotes from './pages/Remotes.jsx';
 import Settings from './pages/Settings.jsx';
+import Profile from './pages/Profile.jsx';
 
 const NAV = [
   { key: 'overview', label: '概览', icon: 'home' },
   { key: 'tasks', label: '备份任务', icon: 'sync' },
   { key: 'runs', label: '运行记录', icon: 'history' },
-  { key: 'remotes', label: '网盘管理', icon: 'drive' },
-  { key: 'settings', label: '设置', icon: 'gear' }
+  { key: 'remotes', label: '网盘管理', icon: 'drive' }
 ];
-const TITLES = { overview: '概览', tasks: '备份任务', runs: '运行记录', remotes: '网盘管理', settings: '设置' };
+const PAGE_KEYS = [...NAV.map((n) => n.key), 'settings', 'profile'];
+const TITLES = { overview: '概览', tasks: '备份任务', runs: '运行记录', remotes: '网盘管理', settings: '设置', profile: '个人资料' };
 
 function routeFromHash() {
   const h = location.hash.replace(/^#\/?/, '').split('?')[0];
-  return NAV.some((n) => n.key === h) ? h : 'overview';
+  return PAGE_KEYS.includes(h) ? h : 'overview';
 }
 
 // #12：Telegram 通知里的直达链接形如 /runs?focus=记录ID（也兼容 #/runs?focus= 写法）
@@ -52,6 +53,8 @@ export default function App() {
   const [runToasts, setRunToasts] = useState([]); // #10 任务完成通知条
   const [focusRun, setFocusRun] = useState({ id: DEEP_FOCUS, n: DEEP_FOCUS ? 1 : 0 });
   const [navOpen, setNavOpen] = useState(false); // #11 手机抽屉侧栏开关
+  const [userMenuOpen, setUserMenuOpen] = useState(false); // #23 侧栏底部头像菜单
+  const userMenuRef = useRef(null);
   const runStatusRef = useRef(null); // 运行记录 id -> 上次见到的状态（null=还没初始化）
 
   function toast(text, isErr = false) {
@@ -62,6 +65,7 @@ export default function App() {
     location.hash = '/' + key;
     setPage(key);
     setNavOpen(false); // 抽屉模式下点完导航自动收起
+    setUserMenuOpen(false);
   }
   function gotoRun(runId) {
     setFocusRun((f) => ({ id: runId, n: f.n + 1 }));
@@ -85,6 +89,21 @@ export default function App() {
     return () => window.removeEventListener('hashchange', fn);
   }, []);
   useEffect(() => { if (me?.authed) loadDrives(); }, [me, page]);
+
+  // #23：头像菜单打开时，点菜单外或按 Escape 自动收起
+  useEffect(() => {
+    if (!userMenuOpen) return;
+    const onPointerDown = (e) => {
+      if (!userMenuRef.current?.contains(e.target)) setUserMenuOpen(false);
+    };
+    const onKeyDown = (e) => { if (e.key === 'Escape') setUserMenuOpen(false); };
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [userMenuOpen]);
 
   // #10：轮询运行记录，面板打开期间有任务新完成（成功/失败）就弹右下角通知条
   useEffect(() => {
@@ -122,6 +141,7 @@ export default function App() {
   if (!me.authed) return <Login me={me} onAuthed={checkMe} />;
 
   async function logout() {
+    setUserMenuOpen(false);
     await api.post('/auth/logout').catch(() => {});
     setMe({ authed: false, needsSetup: false });
   }
@@ -160,8 +180,27 @@ export default function App() {
           </button>
         </div>
         <div className="side-foot">
-          <button onClick={logout}><Icon name="logout" size={14} /><span className="nav-label">退出登录</span></button>
-          <div className="side-acct" style={{ marginTop: 8 }}>账号：{me.user}</div>
+          <div className="side-user-wrap" ref={userMenuRef}>
+            <button type="button" className="side-avatar-btn" title="个人资料与账号"
+              aria-label="打开个人资料菜单" aria-haspopup="menu" aria-expanded={userMenuOpen}
+              onClick={() => setUserMenuOpen((v) => !v)}>
+              <span className="avatar">{(me.user || '?').slice(0, 1).toUpperCase()}</span>
+            </button>
+            {userMenuOpen && (
+              <div className="side-user-menu" role="menu" aria-label="账号菜单">
+                <button type="button" role="menuitem" onClick={() => nav('profile')}>
+                  <Icon name="user" size={16} /> 个人资料
+                </button>
+                <button type="button" role="menuitem" className="menu-logout" onClick={logout}>
+                  <Icon name="logout" size={16} /> 退出登录
+                </button>
+              </div>
+            )}
+          </div>
+          <button type="button" className={`side-gear-btn${page === 'settings' ? ' active' : ''}`}
+            title="设置" aria-label="打开设置" onClick={() => nav('settings')}>
+            <Icon name="gear" size={19} />
+          </button>
         </div>
       </aside>
 
@@ -172,10 +211,6 @@ export default function App() {
           </button>
           <span className="crumb">rclona / {TITLES[page]}</span>
           <div className="spacer" />
-          <div className="user-chip">
-            <span className="avatar">{(me.user || '?').slice(0, 1).toUpperCase()}</span>
-            {me.user}
-          </div>
         </div>
         <div className="page">
           {page === 'overview' && <Overview nav={nav} gotoRun={gotoRun} />}
@@ -183,6 +218,7 @@ export default function App() {
           {page === 'runs' && <Runs key={focusRun.n} focusRunId={focusRun.id} />}
           {page === 'remotes' && <Remotes toast={toast} nav={nav} />}
           {page === 'settings' && <Settings toast={toast} />}
+          {page === 'profile' && <Profile me={me} toast={toast} />}
         </div>
       </div>
 

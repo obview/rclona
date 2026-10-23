@@ -902,6 +902,30 @@ async function main() {
     ok(firstOkMsgs().length === 1, '第二次定时成功不再发首次成功通知（总共仍只有 1 条）',
       `实际 ${firstOkMsgs().length} 条`);
 
+    console.log('== 18. #23：个人资料里的改密接口（当前密码校验 + 新密码登录）==');
+    const wrongPw = await api('POST', '/api/auth/password', {
+      oldPassword: 'not-the-password', newPassword: 'newpass456'
+    });
+    ok(wrongPw.status === 400 && /当前密码不对/.test(wrongPw.data?.error || ''),
+      '当前密码填错时拒绝改密', wrongPw.data?.error || '');
+    const shortPw = await api('POST', '/api/auth/password', {
+      oldPassword: 'testpass123', newPassword: 'short'
+    });
+    ok(shortPw.status === 400 && /至少 8 位/.test(shortPw.data?.error || ''),
+      '新密码不足 8 位时拒绝改密', shortPw.data?.error || '');
+    const changedPw = await api('POST', '/api/auth/password', {
+      oldPassword: 'testpass123', newPassword: 'newpass456'
+    });
+    ok(changedPw.status === 200, '当前密码正确时改密成功');
+    const meAfterPw = await api('GET', '/api/auth/me');
+    ok(meAfterPw.data?.authed === true, '改密后当前会话仍有效（沿用现有进程内会话行为）');
+    const logoutRes = await api('POST', '/api/auth/logout');
+    ok(logoutRes.status === 200, '退出登录成功');
+    const oldLogin = await api('POST', '/api/auth/login', { user: 'tester', password: 'testpass123' });
+    ok(oldLogin.status === 401, '改密后旧密码不能再登录');
+    const newLogin = await api('POST', '/api/auth/login', { user: 'tester', password: 'newpass456' });
+    ok(newLogin.status === 200, '改密后新密码可以登录');
+
     console.log(failures === 0 ? '\n全部自测通过 ✅' : `\n有 ${failures} 项未通过 ❌`);
   } finally {
     gw.kill('SIGTERM');

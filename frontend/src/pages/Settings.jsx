@@ -11,7 +11,6 @@ export default function Settings({ toast }) {
   const [tokenSet, setTokenSet] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
-  const [pw, setPw] = useState({ old: '', next: '', next2: '' });
 
   useEffect(() => {
     api.get('/settings').then((d) => {
@@ -46,22 +45,13 @@ export default function Settings({ toast }) {
     } catch (e) { toast(e.message, true); }
     setTesting(false);
   }
-  async function changePw() {
-    if (pw.next.length < 8) { toast('新密码至少 8 位', true); return; }
-    if (pw.next !== pw.next2) { toast('两次输入的新密码不一致', true); return; }
-    try {
-      await api.post('/auth/password', { oldPassword: pw.old, newPassword: pw.next });
-      toast('密码已修改');
-      setPw({ old: '', next: '', next2: '' });
-    } catch (e) { toast(e.message, true); }
-  }
 
   return (
     <div>
       <div className="page-head">
         <div>
           <div className="page-title">设置</div>
-          <div className="page-sub">Telegram 通知与账号安全</div>
+          <div className="page-sub">备份失败、网盘异常时如何通知你</div>
         </div>
         <div className="spacer" />
         <button className="btn btn-primary" disabled={saving} onClick={save}>{saving ? '保存中…' : '保存设置'}</button>
@@ -114,27 +104,6 @@ export default function Settings({ toast }) {
         )}
       </div>
 
-      <div className="card card-pad">
-        <div className="card-title">修改登录密码</div>
-        <div className="card-sub">改完后请用新密码重新登录其他设备</div>
-        <div className="form-grid" style={{ marginTop: 14 }}>
-          <div className="field">
-            <label>当前密码</label>
-            <input className="input" type="password" value={pw.old} onChange={(e) => setPw({ ...pw, old: e.target.value })} />
-          </div>
-          <div className="field">
-            <label>新密码（至少 8 位）</label>
-            <input className="input" type="password" value={pw.next} onChange={(e) => setPw({ ...pw, next: e.target.value })} />
-          </div>
-          <div className="field">
-            <label>再输一遍新密码</label>
-            <input className="input" type="password" value={pw.next2} onChange={(e) => setPw({ ...pw, next2: e.target.value })} />
-          </div>
-        </div>
-        <div style={{ marginTop: 14 }}>
-          <button className="btn btn-ghost" onClick={changePw}>修改密码</button>
-        </div>
-      </div>
     </div>
   );
 }
