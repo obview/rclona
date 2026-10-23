@@ -144,7 +144,7 @@ export function FolderPicker({ remote, remoteType, value, onChange }) {
       setDirs(d.dirs || []);
       setPath(p);
       onChange(p);
-    } catch (e) { setErr(e.message); setErrCode(e.data?.code || ''); }
+    } catch (e) { setErr(e.message); setErrCode(e.data?.code || ''); setDirs([]); }
     setLoading(false);
   }
   function useManual() {
@@ -196,7 +196,7 @@ export function FolderPicker({ remote, remoteType, value, onChange }) {
           </div>
         )}
         {loading && <div className="folder-item" style={{ color: 'var(--text-3)' }}>加载中…</div>}
-        {!loading && dirs.length === 0 && <div className="folder-item" style={{ color: 'var(--text-3)' }}>（没有子文件夹，就选当前目录即可）</div>}
+        {!loading && !err && dirs.length === 0 && <div className="folder-item" style={{ color: 'var(--text-3)' }}>（没有子文件夹，就选当前目录即可）</div>}
         {!loading && dirs.map((d) => (
           <div className="folder-item" key={d.path} onClick={() => load(d.path)}>
             <span style={{ color: '#e8a13a' }}><Icon name="folder" size={16} /></span>{d.name}

@@ -235,8 +235,20 @@ export function createServer() {
           const sub = url.searchParams.get('path') || '';
           // 把目录路径拼进 fs 规格里列一层（本地目录可用绝对路径从 / 浏览）
           let list;
+          let effSub = sub;
           try {
-            ({ list } = await rc.list(fsSpec(remote, sub), ''));
+            let spec = fsSpec(remote, sub);
+            if (sub === '' || sub === '/') {
+              // #21：仅浏览层特判，不动全局 fsSpec（runner 与 S3 共用它的剥尾斜杠规则）。
+              // local 网盘根目录若走 fsSpec("/") 会被剥成 "名字:"，rclone local 把空路径
+              // 解释为 rcd 进程的工作目录（列出来的是网关目录而非文件系统根），且随后
+              // 按绝对路径点子目录（"名字:/etc"）与这个锚点对不上、报 404。
+              // 故 local 根目录改发 "名字:/"，子路径仍走 fsSpec 的绝对拼接。
+              let type = '';
+              try { type = (await rc.getRemote(remote))?.type || ''; } catch { /* 取不到类型按原样 */ }
+              if (type === 'local') { spec = `${remote}:/`; effSub = '/'; }
+            }
+            ({ list } = await rc.list(spec, ''));
           } catch (e) {
             // 浏览到不存在 / 打不开的路径：给一句白话提示即可，不要把 rclone 的英文报错甩给用户。
             // 注意：浏览时不自动建目录——建目录只发生在真正执行备份时（目标目录不存在会自动创建）
@@ -250,7 +262,7 @@ export function createServer() {
             return sendJson(res, 400, { error: hint, code: kind });
           }
           const dirs = (list || []).filter((x) => x.IsDir)
-            .map((x) => ({ name: x.Name, path: (sub && sub !== '/' ? sub.replace(/\/+$/, '') + '/' : sub === '/' ? '/' : '') + x.Name }));
+            .map((x) => ({ name: x.Name, path: (effSub && effSub !== '/' ? effSub.replace(/\/+$/, '') + '/' : effSub === '/' ? '/' : '') + x.Name }));
           return sendJson(res, 200, { dirs });
         }
 

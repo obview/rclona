@@ -174,6 +174,20 @@ async function main() {
     const koofrPw = (prov.data.providers?.koofr?.options || []).find((o) => o.name === 'password');
     ok(koofrPw?.type === 'password', 'Koofr 密码字段被识别为 password 类型');
 
+    console.log('== 2b. 本地网盘根目录浏览（#21：列的是文件系统根，不是网关工作目录）==');
+    const bRoot = await api('GET', '/api/browse?remote=tsrc&path=%2F');
+    ok(bRoot.status === 200, 'local 网盘 path=/ 浏览成功', `状态=${bRoot.status} ${bRoot.data?.error || ''}`);
+    const rootDirs = bRoot.data?.dirs || [];
+    const rootNames = rootDirs.map((d) => d.name);
+    ok(rootNames.includes('tmp'), '根目录列出文件系统根（含 tmp，而非网关 CWD 的 src/test）', rootNames.slice(0, 10).join(','));
+    ok(rootDirs.length > 0 && rootDirs.every((d) => d.path.startsWith('/')), '根下条目路径均为绝对路径（点子目录锚点一致）');
+    const bRootEmpty = await api('GET', '/api/browse?remote=tsrc&path=');
+    ok(bRootEmpty.status === 200 && (bRootEmpty.data?.dirs || []).some((d) => d.name === 'tmp'),
+      'local 网盘 path=（空）同样落到文件系统根');
+    const bTmp = await api('GET', '/api/browse?remote=tsrc&path=%2Ftmp');
+    ok(bTmp.status === 200 && (bTmp.data?.dirs || []).some((d) => d.name === 'rclona-e2e'),
+      '从根逐级点进 /tmp 可达且能看到自测目录', `状态=${bTmp.status} ${bTmp.data?.error || ''}`);
+
     console.log('== 3. 建任务并手动执行（真实 sync）==');
     const taskRes = await api('POST', '/api/tasks', {
       name: '自测备份', srcRemote: 'tsrc', srcPath: srcDir,
