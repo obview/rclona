@@ -584,6 +584,10 @@ export function createServer() {
         // #27 B 段：配置导出——任务 + 设置（非敏感项）+ 网盘（非敏感字段）。
         // 红线：网盘密码/密钥、Telegram 令牌、备份加密密码、面板登录信息一律不进文件；
         // 网盘只记下「哪些密码字段原本有值」（secrets 名单），导入后凭名单提示逐个补填。
+        // #33：配置导出 = 完整备份（sun 明确要求导入后完全还原、不再逐个补填）：
+        // 网盘全部字段（含密钥，rclone 保存形态）、Telegram 全部设置（含令牌）、备份加密密码
+        // （服务端保存形态）、面板登录的盐+哈希（非明文密码）、任务与设置全量都在里面。
+        // 这是用户在自己面板里主动下载的文件；网关日志/测试里绝不打印其内容。
         if (p === '/api/settings/export' && req.method === 'GET') {
           const s = store.data.settings;
           const remotes = [];
@@ -591,29 +595,33 @@ export function createServer() {
             let cur = null;
             try { cur = await rc.getRemote(name); } catch { /* 读不到的网盘跳过 */ }
             if (!cur || !cur.type) continue;
-            const pwFields = await passwordFieldNames(cur.type);
             const config = {};
-            const secrets = [];
             for (const [k, v] of Object.entries(cur)) {
               if (k === 'type') continue;
-              if (pwFields.has(k)) { if (v) secrets.push(k); continue; }
-              config[k] = v;
+              config[k] = v; // 含密码类字段：值是 rclone 的保存形态，导入端原样写回即可用
             }
-            remotes.push({ name, type: cur.type, config, secrets });
+            const rs = (store.data.remoteState || {})[name] || {};
+            remotes.push({ name, type: cur.type, config, paused: !!rs.paused, createdAt: rs.createdAt || null });
           }
           const doc = {
-            app: 'rclona', kind: 'config-export', version: 1,
+            app: 'rclona', kind: 'config-export', version: 2,
             exportedAt: new Date().toISOString(),
-            note: '此文件不包含任何密钥明文：网盘密码/密钥、Telegram 机器人令牌、备份加密密码、面板登录信息都不在里面。导入到另一台机器后，请到「网盘管理」逐个点「编辑」补填密码/密钥（带「待补填凭证」标记的就是还没补的），备份加密密码要到「设置」里重新填。',
+            note: '警告：这个文件里有你全部网盘的登录密钥、Telegram 机器人令牌和备份加密密码，等于你所有网盘的钥匙。只许存在你自己的设备上，不要发给任何人、不要通过聊天软件传输、不要上传到公开网盘。导入后可以完整还原，不需要再补填任何密码。',
             settings: {
-              telegram: { enabled: !!s.telegram?.enabled, chatId: s.telegram?.chatId || '', panelAddress: s.telegram?.panelAddress || '' },
+              telegram: {
+                enabled: !!s.telegram?.enabled, chatId: s.telegram?.chatId || '',
+                panelAddress: s.telegram?.panelAddress || '', botToken: s.telegram?.botToken || ''
+              },
               capacity: { alertPercent: capacityThreshold() },
-              cryptPasswordSet: cryptPasswordSet()
+              backupCrypt: { password: s.backupCrypt?.password || '' }
             },
+            auth: store.data.auth
+              ? { user: store.data.auth.user, salt: store.data.auth.salt, hash: store.data.auth.hash }
+              : null,
             remotes,
             tasks: store.data.tasks.map((t) => ({
               name: t.name, srcRemote: t.srcRemote, dstRemote: t.dstRemote,
-              pairs: pairsOf(t), schedule: t.schedule,
+              pairs: pairsOf(t), schedule: t.schedule, mode: t.mode || 'mirror',
               versioning: t.versioning, maxDelete: t.maxDelete,
               bwlimit: t.bwlimit, trackRenames: t.trackRenames, crypt: t.crypt,
               enabled: !!t.enabled
@@ -621,13 +629,16 @@ export function createServer() {
           };
           res.writeHead(200, {
             'Content-Type': 'application/json; charset=utf-8',
-            'Content-Disposition': `attachment; filename="rclona-config-${new Date().toISOString().slice(0, 10)}.json"`
+            'Content-Disposition': `attachment; filename="rclona-backup-${new Date().toISOString().slice(0, 10)}.json"`
           });
           return res.end(JSON.stringify(doc, null, 2));
         }
 
-        // #27 B 段：配置导入——按名字合并：同名网盘/任务跳过（不覆盖现有配置），新的才加进来；
-        // 导入的任务一律先停用，补好凭证、检查无误后由用户手动启用，绝不导入完就自动开跑。
+        // #33：配置导入 = 还原。版本 2（完整备份）：同名网盘/任务以文件为准覆盖、新的补入，
+        // 任务的启用状态与定时按文件恢复，Telegram/加密密码/登录校验一并还原，不再要补填任何东西；
+        // 版本 1（旧的去密钥导出）仍可导入：同名网盘只更新非密钥字段（已有密钥不被空值冲掉）、
+        // 新网盘缺密钥的照旧打「待补填凭证」标记、同名任务跳过、新任务先停用——并在报告里
+        // 用 missingSecrets 点名哪些是旧格式缺密钥的。
         if (p === '/api/settings/import' && req.method === 'POST') {
           const b = await readBody(req);
           const doc = b?.data ?? b;
@@ -635,61 +646,153 @@ export function createServer() {
             return sendJson(res, 400, { error: '导入失败：这不是 rclona 的配置导出文件（请选择用面板「导出配置」下载的那个 JSON 文件）' });
           }
           if (doc.app !== 'rclona') return sendJson(res, 400, { error: '导入失败：这不是 rclona 的配置导出文件' });
-          if (doc.version !== 1) return sendJson(res, 400, { error: `导入失败：这个导出文件的版本（${doc.version ?? '未知'}）暂时不支持，只支持版本 1` });
-          const rep = { remotesAdded: [], remotesSkipped: [], tasksAdded: [], tasksSkipped: [], errors: [] };
+          if (doc.version !== 1 && doc.version !== 2) {
+            return sendJson(res, 400, { error: `导入失败：这个导出文件的版本（${doc.version ?? '未知'}）暂时不支持，只支持版本 1 和 2` });
+          }
+          const full = doc.version === 2;
+          const rep = {
+            remotesAdded: [], remotesReplaced: [], remotesUpdated: [], remotesSkipped: [],
+            tasksAdded: [], tasksReplaced: [], tasksSkipped: [],
+            missingSecrets: [], authRestored: false, errors: []
+          };
           if (doc.settings && typeof doc.settings === 'object') {
             const s = store.data.settings;
             if (doc.settings.telegram) {
+              const tg = doc.settings.telegram;
               s.telegram = {
-                ...(s.telegram || {}), // 机器人令牌不在导出里：本机已存的令牌保持不动
-                enabled: !!doc.settings.telegram.enabled,
-                chatId: String(doc.settings.telegram.chatId || ''),
-                panelAddress: String(doc.settings.telegram.panelAddress || '').replace(/\/+$/, '')
+                ...(s.telegram || {}),
+                enabled: !!tg.enabled,
+                chatId: String(tg.chatId || ''),
+                panelAddress: String(tg.panelAddress || '').replace(/\/+$/, '')
               };
+              // 令牌只在完整备份（v2）里有：有才覆盖；v1 文件没有这个字段，本机令牌保持不动
+              if (full && typeof tg.botToken === 'string') s.telegram.botToken = tg.botToken;
             }
             if (doc.settings.capacity && Number.isFinite(Number(doc.settings.capacity.alertPercent))) {
               const pct = Math.trunc(Number(doc.settings.capacity.alertPercent));
               if (pct >= 0 && pct <= 100) s.capacity = { alertPercent: pct };
             }
+            // 备份加密密码（服务端保存形态）只在 v2 里有，非空才还原
+            if (full && typeof doc.settings.backupCrypt?.password === 'string' && doc.settings.backupCrypt.password) {
+              if (!s.backupCrypt) s.backupCrypt = { password: '' };
+              s.backupCrypt.password = doc.settings.backupCrypt.password;
+            }
+          }
+          // 面板登录校验（盐+哈希，非明文）：只在 v2 里有，还原后原账号密码直接能登录
+          if (full && doc.auth && typeof doc.auth === 'object' && doc.auth.salt && doc.auth.hash) {
+            store.data.auth = { user: String(doc.auth.user || ''), salt: String(doc.auth.salt), hash: String(doc.auth.hash) };
+            rep.authRestored = true;
           }
           const existingRemotes = await rc.listRemotes().catch(() => []);
           for (const r of Array.isArray(doc.remotes) ? doc.remotes : []) {
             const name = String(r?.name || '').trim();
             const type = String(r?.type || '').trim();
             if (!REMOTE_NAME_RE.test(name) || !type) { rep.errors.push(`有一个网盘条目名字或类型不对，已跳过（名字：${name || '（空）'}）`); continue; }
-            if (existingRemotes.includes(name)) { rep.remotesSkipped.push(name); continue; }
+            const exists = existingRemotes.includes(name);
             const pwFields = await passwordFieldNames(type);
+            if (full) {
+              // 完整备份：全部字段原样写回（含密钥）。同名 = 先删后建地整体替换；
+              // 万一重建失败，用导入前读到的旧配置兜底恢复，避免「删了又没建上」
+              const params = {};
+              for (const [k, v] of Object.entries(r?.config || {})) {
+                if (k === 'type' || v === '' || v === null || v === undefined) continue;
+                params[k] = v;
+              }
+              let oldCfg = null;
+              if (exists) { try { oldCfg = await rc.getRemote(name); } catch { /* 读不到就无兜底 */ } }
+              try {
+                if (exists) await rc.deleteRemote(name);
+                await rc.createRemote(name, type, params);
+                if (!exists) existingRemotes.push(name);
+                delete store.data.health[name]; // 旧健康状态作废，等下一次自检重新测
+                if (!store.data.remoteState) store.data.remoteState = {};
+                store.data.remoteState[name] = {
+                  ...(store.data.remoteState[name] || {}),
+                  createdAt: r.createdAt || store.data.remoteState[name]?.createdAt || new Date().toISOString()
+                };
+                if (typeof r.paused === 'boolean') store.setPaused(name, r.paused);
+                store.setNeedsCredentials(name, false);
+                (exists ? rep.remotesReplaced : rep.remotesAdded).push(name);
+              } catch (e) {
+                if (exists && oldCfg?.type) {
+                  const back = {};
+                  for (const [k, v] of Object.entries(oldCfg)) if (k !== 'type') back[k] = v;
+                  await rc.createRemote(name, oldCfg.type, back).catch(() => {});
+                  rep.errors.push(`网盘「${name}」替换失败，已恢复成导入前的配置：${e.message}`);
+                } else {
+                  rep.errors.push(`网盘「${name}」导入失败：${e.message}`);
+                }
+              }
+              continue;
+            }
+            // —— v1 旧格式（去密钥）：密码类字段一律不碰 ——
+            if (exists) {
+              // 同名：只更新非密钥字段，已存的密钥原样保留，绝不被空值冲掉
+              const params = {};
+              for (const [k, v] of Object.entries(r?.config || {})) {
+                if (k === 'type' || pwFields.has(k) || v === '' || v === null || v === undefined) continue;
+                params[k] = v;
+              }
+              try {
+                if (Object.keys(params).length) await rc.updateRemote(name, params);
+                rep.remotesUpdated.push(name);
+                if (Array.isArray(r.secrets) && r.secrets.length) rep.missingSecrets.push(name);
+              } catch (e) { rep.errors.push(`网盘「${name}」更新失败：${e.message}`); }
+              continue;
+            }
             const params = {};
             for (const [k, v] of Object.entries(r?.config || {})) {
-              // 密码类字段就算文件里混进了值也一律丢弃，绝不把别处的密钥带进来
               if (k === 'type' || pwFields.has(k) || v === '' || v === null || v === undefined) continue;
               params[k] = v;
             }
             try {
               await rc.createRemote(name, type, params);
               existingRemotes.push(name);
+              if (!store.data.remoteState) store.data.remoteState = {};
+              store.data.remoteState[name] = { ...(store.data.remoteState[name] || {}), createdAt: new Date().toISOString() };
               rep.remotesAdded.push(name);
-              if (Array.isArray(r.secrets) && r.secrets.length) store.setNeedsCredentials(name, true);
+              if (Array.isArray(r.secrets) && r.secrets.length) {
+                store.setNeedsCredentials(name, true);
+                rep.missingSecrets.push(name);
+              }
             } catch (e) { rep.errors.push(`网盘「${name}」导入失败：${e.message}`); }
           }
-          const existingTaskNames = new Set(store.data.tasks.map((t) => t.name));
+          const taskByName = new Map(store.data.tasks.map((t) => [t.name, t]));
           for (const rt of Array.isArray(doc.tasks) ? doc.tasks : []) {
             const name = String(rt?.name || '').trim();
             if (!name) { rep.errors.push('有一个任务条目没有名字，已跳过'); continue; }
-            if (existingTaskNames.has(name)) { rep.tasksSkipped.push(name); continue; }
+            const existingTask = taskByName.get(name);
+            if (existingTask && !full) { rep.tasksSkipped.push(name); continue; }
             try {
               const task = validateTask(rt);
               const now = new Date();
-              task.id = newId();
-              task.enabled = false; // 一律先停用：补好凭证、人工检查后再启用
-              task.createdAt = now.toISOString();
-              task.anchorAt = now.toISOString();
-              task.nextRunAt = null;
-              task.lastRunAt = null; task.lastStatus = null; task.lastSlotKey = '';
-              task.firstSuccessNotified = false;
-              store.data.tasks.push(task);
-              existingTaskNames.add(task.name);
-              rep.tasksAdded.push(task.name);
+              if (existingTask) {
+                // v2 同名任务：以文件为准整体替换，但保留 id/创建时间/运行历史关联；
+                // 启用状态与下次运行时间按文件恢复（scheduler 按 anchor 重算，与编辑任务同一口径）
+                const keep = {
+                  id: existingTask.id, createdAt: existingTask.createdAt, anchorAt: existingTask.anchorAt || now.toISOString(),
+                  lastRunAt: existingTask.lastRunAt, lastStatus: existingTask.lastStatus,
+                  lastSlotKey: existingTask.lastSlotKey, firstSuccessNotified: existingTask.firstSuccessNotified
+                };
+                Object.assign(existingTask, task, keep);
+                existingTask.enabled = !!rt.enabled;
+                const next = existingTask.enabled ? nextSlotAfter(existingTask.schedule, now, existingTask.anchorAt) : null;
+                existingTask.nextRunAt = next ? next.toISOString() : null;
+                rep.tasksReplaced.push(name);
+              } else {
+                task.id = newId();
+                // v2 按文件恢复启用状态；v1 一律先停用（凭证可能还没补，人工检查后再启用）
+                task.enabled = full ? !!rt.enabled : false;
+                task.createdAt = now.toISOString();
+                task.anchorAt = now.toISOString();
+                const next = task.enabled ? nextSlotAfter(task.schedule, now, task.anchorAt) : null;
+                task.nextRunAt = next ? next.toISOString() : null;
+                task.lastRunAt = null; task.lastStatus = null; task.lastSlotKey = '';
+                task.firstSuccessNotified = false;
+                store.data.tasks.push(task);
+                taskByName.set(task.name, task);
+                rep.tasksAdded.push(task.name);
+              }
             } catch (e) { rep.errors.push(`任务「${name}」导入失败：${e.message}`); }
           }
           store.save();

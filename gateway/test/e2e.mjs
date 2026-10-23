@@ -1390,7 +1390,8 @@ async function main() {
       '副本先停用、无下次执行时间（不会自动跑）');
     ok(JSON.stringify(dupTask.pairs) === JSON.stringify(dupSrc.data.task.pairs), '副本的映射配置与原任务一致');
 
-    // 21e 导出：带密码的网盘只记「哪些密码字段有值」，任何密钥明文都不得出现在文件里
+    // 21e 导出（#33 改版为完整备份）：假密钥都在里面（Telegram 令牌原文、网盘密码的保存形态、
+    // 加密密码的保存形态、登录盐+哈希），但任何密码的明文都不许出现
     const davRes = await api('POST', '/api/remotes', {
       name: 'texportdav', type: 'webdav',
       config: { url: 'http://127.0.0.1:9/dav', user: 'u1', pass: 'dav-secret-pw-21' }
@@ -1398,22 +1399,36 @@ async function main() {
     ok(davRes.status === 200, '带密码的 WebDAV 网盘创建成功（连不通不影响创建）');
     ok(!fs.readFileSync(path.join(dataDir21, 'rclone.conf'), 'utf8').includes('dav-secret-pw-21'),
       '前置：rclone 配置文件里存的也不是密码明文');
+    const confPassOf = (name) => {
+      const conf = fs.readFileSync(path.join(dataDir21, 'rclone.conf'), 'utf8');
+      const sec = conf.split(/\r?\n\[/).find((s) => s.startsWith(`${name}]`));
+      return ((sec || '').match(/^pass\s*=\s*(.+)$/m) || [])[1]?.trim() || '';
+    };
+    const davStoredPass = confPassOf('texportdav');
+    ok(!!davStoredPass && davStoredPass !== 'dav-secret-pw-21', '前置：已取到 WebDAV 密码在 rclone 里的保存形态');
     const expRes = await fetch(`${BASE}/api/settings/export`, { headers: { Cookie: cookie } });
     const expText = await expRes.text();
-    ok(expRes.status === 200 && (expRes.headers.get('content-disposition') || '').includes('rclona-config'),
-      '导出接口返回配置文件下载');
-    ok(!expText.includes('TESTTOKEN123') && !expText.includes('dav-secret-pw-21')
-      && !expText.includes(CRYPT_PW) && !expText.includes('testpass123'),
-      '导出文件不含任何密钥明文（Telegram 令牌/WebDAV 密码/加密密码/面板密码）');
+    ok(expRes.status === 200 && (expRes.headers.get('content-disposition') || '').includes('rclona-backup'),
+      '导出接口返回完整备份文件下载');
     const expDoc = JSON.parse(expText);
+    ok(expDoc.version === 2, '导出文件是版本 2（完整备份）');
+    ok(expDoc.settings?.telegram?.botToken === 'TESTTOKEN123' && expDoc.settings?.telegram?.chatId === '424242',
+      '导出包含 Telegram 全部设置（含令牌，此处是自测假值）');
+    ok(!expText.includes('dav-secret-pw-21') && !expText.includes(CRYPT_PW) && !expText.includes('newpass456'),
+      '导出不含任何密码明文（WebDAV 密码/加密密码/面板密码都只有保存形态或哈希）');
     const expDav = (expDoc.remotes || []).find((r) => r.name === 'texportdav');
-    ok(!!expDav && (expDav.secrets || []).includes('pass') && !('pass' in (expDav.config || {})) && expDav.config?.user === 'u1',
-      '导出里 WebDAV 网盘只记「pass 已设置过」、不含其值，非敏感字段保留');
-    ok((expDoc.tasks || []).some((t) => t.name === '复制源任务（副本）') && expDoc.settings?.telegram?.chatId === '424242',
-      '导出含任务清单与非敏感设置');
+    ok(!!expDav && expDav.config?.pass === davStoredPass && expDav.config?.user === 'u1',
+      '导出里 WebDAV 网盘带密码的保存形态（可原样写回、直接能用）');
+    ok(typeof expDoc.settings?.backupCrypt?.password === 'string' && expDoc.settings.backupCrypt.password.length > 0
+      && expDoc.settings.backupCrypt.password !== CRYPT_PW,
+      '导出含备份加密密码（服务端保存形态）');
+    ok(!!expDoc.auth?.salt && !!expDoc.auth?.hash && expDoc.auth.user === 'tester',
+      '导出含面板登录校验信息（盐+哈希，非明文密码）');
+    ok((expDoc.tasks || []).some((t) => t.name === '复制源任务（副本）' && 'mode' in t),
+      '导出含任务清单（含同步方式字段）');
 
-    // 21f 导入往返：删掉副本任务与 texportdav 后导入应都回来（网盘带待补填标记、任务停用）；
-    // 再导一次应全部同名跳过；坏文件/坏版本被拒
+    // 21f 导入往返（#33 还原语义）：删掉副本任务与 texportdav 后导入应都回来——网盘带密钥、
+    // 无「待补填凭证」、密码保存形态逐字一致；再导一次变同名覆盖（保留任务 ID、不产生重复）；坏文件照旧被拒
     await api('DELETE', `/api/tasks/${dupTask.id}`);
     await api('DELETE', '/api/remotes/texportdav');
     const imp1 = await api('POST', '/api/settings/import', { data: expDoc });
@@ -1422,18 +1437,23 @@ async function main() {
       '导入把删掉的网盘与任务都加了回来', JSON.stringify(rep1));
     const remotesAfterImp = await api('GET', '/api/remotes');
     const davBack = (remotesAfterImp.data.remotes || []).find((r) => r.name === 'texportdav');
-    ok(!!davBack && davBack.needsCredentials === true, '导入回来的网盘带「待补填凭证」标记');
+    ok(!!davBack && davBack.needsCredentials === false, '完整备份导入回来的网盘不再有「待补填凭证」标记');
+    ok(confPassOf('texportdav') === davStoredPass, '导入后 WebDAV 密码与导出前逐字一致（真还原、不用补填）');
     const tasksAfterImp = await api('GET', '/api/tasks');
     const dupBack = tasksAfterImp.data.tasks.find((t) => t.name === '复制源任务（副本）');
-    ok(!!dupBack && dupBack.enabled === false && dupBack.id !== dupTask.id, '导入回来的任务是新 ID 且处于停用状态');
+    ok(!!dupBack && dupBack.enabled === false && dupBack.id !== dupTask.id,
+      '导入回来的任务按文件恢复启用状态（副本在文件里就是停用的）、新 ID');
     const imp2 = await api('POST', '/api/settings/import', { data: expDoc });
     const rep2 = imp2.data?.report || {};
     ok((rep2.remotesAdded || []).length === 0 && (rep2.tasksAdded || []).length === 0
-      && rep2.remotesSkipped?.includes('texportdav') && rep2.tasksSkipped?.includes('复制源任务（副本）'),
-      '重复导入全部同名跳过（不覆盖、不产生重复）', JSON.stringify(rep2));
+      && rep2.remotesReplaced?.includes('texportdav') && rep2.tasksReplaced?.includes('复制源任务（副本）'),
+      '重复导入变成同名覆盖（以文件为准），不新增条目', JSON.stringify(rep2));
     const tasksFinal21 = await api('GET', '/api/tasks');
     ok(tasksFinal21.data.tasks.filter((t) => t.name === '复制源任务（副本）').length === 1,
-      '重复导入后同名任务仍只有一个（无重复条目）');
+      '重复导入后同名任务仍只有一个（覆盖而非复制）');
+    const dupAfter2 = tasksFinal21.data.tasks.find((t) => t.name === '复制源任务（副本）');
+    ok(!!dupAfter2 && dupAfter2.id === dupBack.id, '覆盖导入保留原任务 ID（运行历史关联不丢）');
+    ok(rep2.authRestored === true, '导入报告标注面板登录已还原');
     const impBad1 = await api('POST', '/api/settings/import', { data: { app: 'not-rclona', version: 1 } });
     ok(impBad1.status === 400 && /rclona/.test(impBad1.data?.error || ''), '非 rclona 文件被拒并给出中文原因', impBad1.data?.error || '');
     const impBad2 = await api('POST', '/api/settings/import', { data: { app: 'rclona', version: 99 } });
@@ -1565,6 +1585,53 @@ async function main() {
     ok(dRef.status === 200 && !!dRef.data.health?.lastCheckAt, '立即刷新（POST 详情）后带最新检查时间');
     const d404 = await api('GET', '/api/remotes/no-such-remote/detail');
     ok(d404.status === 404, '不存在的网盘详情返回 404');
+
+    console.log('== 24. #33：旧格式（v1）导入兼容 + 登录校验还原 ==');
+    // 24a v1 旧文件：同名网盘只更新非密钥字段（已有密钥不被冲掉）、新网盘带待补填标记、报告点名缺密钥
+    const passBefore24 = confPassOf('texportdav');
+    const v1Doc = {
+      app: 'rclona', kind: 'config-export', version: 1,
+      settings: { telegram: { enabled: true, chatId: '424242', panelAddress: '' }, capacity: { alertPercent: 90 } },
+      remotes: [
+        { name: 'texportdav', type: 'webdav', config: { url: 'http://127.0.0.1:9/dav-v1', user: 'u-v1' }, secrets: ['pass'] },
+        { name: 'tv1new', type: 'webdav', config: { url: 'http://127.0.0.1:9/dav-new', user: 'u-new' }, secrets: ['pass'] }
+      ],
+      tasks: []
+    };
+    const impV1 = await api('POST', '/api/settings/import', { data: v1Doc });
+    const repV1 = impV1.data?.report || {};
+    ok(impV1.status === 200 && repV1.remotesUpdated?.includes('texportdav') && repV1.remotesAdded?.includes('tv1new'),
+      '旧格式文件能导入（同名更新、新名新增）', JSON.stringify(repV1));
+    ok(repV1.missingSecrets?.includes('texportdav') && repV1.missingSecrets?.includes('tv1new'),
+      '导入报告点名哪些是旧格式缺密钥的网盘', JSON.stringify(repV1.missingSecrets || []));
+    ok(!!passBefore24 && confPassOf('texportdav') === passBefore24, '旧格式导入没有冲掉已有网盘的密钥');
+    const davCfg24 = await api('GET', '/api/remotes/texportdav/config');
+    ok(davCfg24.data?.config?.user === 'u-v1', '旧格式导入更新了非密钥字段（user 已按文件变）',
+      JSON.stringify(davCfg24.data?.config || {}));
+    const remotes24 = await api('GET', '/api/remotes');
+    ok((remotes24.data.remotes || []).find((r) => r.name === 'tv1new')?.needsCredentials === true,
+      '旧格式导入的新网盘带「待补填凭证」标记');
+    const expAfterV1 = await (await fetch(`${BASE}/api/settings/export`, { headers: { Cookie: cookie } })).json();
+    ok(expAfterV1.settings?.telegram?.botToken === 'TESTTOKEN123', '旧格式导入没有动本机已存的 Telegram 令牌');
+
+    // 24b 登录校验还原：自造一份盐+哈希（口令是自测假值）写进 v2 文件导入 → 新账号能直接登录；
+    // 再把 21e 的真备份导回来 → 原账号恢复
+    const { scryptSync, randomBytes } = await import('node:crypto');
+    const salt24 = randomBytes(16).toString('hex');
+    const hash24 = scryptSync('restorepass789', salt24, 64).toString('hex');
+    const impAuth = await api('POST', '/api/settings/import', {
+      data: {
+        app: 'rclona', kind: 'config-export', version: 2, settings: {}, remotes: [], tasks: [],
+        auth: { user: 'restoreduser', salt: salt24, hash: hash24 }
+      }
+    });
+    ok(impAuth.status === 200 && impAuth.data?.report?.authRestored === true, '完整备份导入报告标注登录已还原');
+    const loginRestored = await api('POST', '/api/auth/login', { user: 'restoreduser', password: 'restorepass789' });
+    ok(loginRestored.status === 200, '还原出的账号密码可以直接登录');
+    const impBack = await api('POST', '/api/settings/import', { data: expDoc });
+    ok(impBack.status === 200, '把原备份再导回来恢复原账号');
+    const loginOrig = await api('POST', '/api/auth/login', { user: 'tester', password: 'newpass456' });
+    ok(loginOrig.status === 200, '原账号密码恢复登录');
 
     console.log(failures === 0 ? '\n全部自测通过 ✅' : `\n有 ${failures} 项未通过 ❌`);
   } finally {

@@ -64,15 +64,39 @@ export default function Settings({ toast }) {
     try {
       const text = await file.text();
       let doc;
-      try { doc = JSON.parse(text); } catch { throw new Error('这个文件不是有效的 JSON，确认选的是「导出配置」下载的那个文件'); }
+      try { doc = JSON.parse(text); } catch { throw new Error('这个文件不是有效的 JSON，确认选的是「导出完整备份」下载的那个文件'); }
+      // #33：完整备份（版本 2）导入是「还原」——同名会覆盖，先把将覆盖/新增的清单弹给用户确认
+      if (doc && doc.app === 'rclona' && doc.version === 2) {
+        const [rd, td] = await Promise.all([api.get('/remotes'), api.get('/tasks')]);
+        const curR = new Set((rd.remotes || []).map((x) => x.name));
+        const curT = new Set((td.tasks || []).map((x) => x.name));
+        const rNames = (doc.remotes || []).map((x) => x.name).filter(Boolean);
+        const tNames = (doc.tasks || []).map((x) => x.name).filter(Boolean);
+        const rOver = rNames.filter((n) => curR.has(n));
+        const rAdd = rNames.filter((n) => !curR.has(n));
+        const tOver = tNames.filter((n) => curT.has(n));
+        const tAdd = tNames.filter((n) => !curT.has(n));
+        const lines = ['即将按这个备份文件还原：'];
+        if (rOver.length) lines.push(`· 覆盖网盘 ${rOver.length} 个：${rOver.join('、')}`);
+        if (rAdd.length) lines.push(`· 新增网盘 ${rAdd.length} 个：${rAdd.join('、')}`);
+        if (tOver.length) lines.push(`· 覆盖任务 ${tOver.length} 个：${tOver.join('、')}`);
+        if (tAdd.length) lines.push(`· 新增任务 ${tAdd.length} 个：${tAdd.join('、')}`);
+        if (doc.auth) lines.push('· 面板登录账号也会被还原成备份里的那个');
+        lines.push('Telegram、备份加密密码等设置也会按文件恢复。确定要继续吗？');
+        if (!window.confirm(lines.join('\n'))) { setImporting(false); return; }
+      }
       const d = await api.post('/settings/import', { data: doc });
       const r = d.report || {};
       const parts = [];
       if (r.remotesAdded?.length) parts.push(`新增网盘 ${r.remotesAdded.length} 个`);
-      if (r.tasksAdded?.length) parts.push(`新增任务 ${r.tasksAdded.length} 个（已先停用，补好凭证再启用）`);
-      if (r.remotesSkipped?.length) parts.push(`同名网盘跳过 ${r.remotesSkipped.length} 个`);
+      if (r.remotesReplaced?.length) parts.push(`覆盖网盘 ${r.remotesReplaced.length} 个`);
+      if (r.remotesUpdated?.length) parts.push(`更新网盘 ${r.remotesUpdated.length} 个（旧格式文件：只更新了非密钥部分）`);
+      if (r.tasksAdded?.length) parts.push(`新增任务 ${r.tasksAdded.length} 个`);
+      if (r.tasksReplaced?.length) parts.push(`覆盖任务 ${r.tasksReplaced.length} 个`);
       if (r.tasksSkipped?.length) parts.push(`同名任务跳过 ${r.tasksSkipped.length} 个`);
-      toast(parts.length ? `导入完成：${parts.join('；')}` : '导入完成：没有新增任何东西（可能都已存在）', false);
+      if (r.authRestored) parts.push('面板登录已还原');
+      toast(parts.length ? `导入完成：${parts.join('；')}` : '导入完成：没有变化', false);
+      if (r.missingSecrets?.length) toast(`这几个网盘是旧格式文件导入的、还缺密钥：${r.missingSecrets.join('、')}（已存的密钥没被动；新加的请到「网盘管理」点「编辑」补填）`, true);
       if (r.errors?.length) toast(`有 ${r.errors.length} 项没导入成功：${r.errors[0]}`, true);
     } catch (err) { toast(err.message, true); }
     setImporting(false);
@@ -184,17 +208,18 @@ export default function Settings({ toast }) {
       </div>
 
       <div className="card card-pad section-gap">
-        <div className="card-title">配置导出 / 导入</div>
-        <div className="card-sub">把任务、网盘和设置打包带走（换服务器、留底都方便）</div>
-        <div className="info-box" style={{ marginTop: 12 }}>
-          导出文件<b>不含任何密钥明文</b>：网盘密码/密钥、Telegram 令牌、备份加密密码、面板登录信息都不会写进去。
-          导入后，网盘要到「网盘管理」逐个点「编辑」补填密码/密钥（带「待补填凭证」标记的就是还没补的），备份加密密码要在这里重新填。
-          导入按名字合并：同名的网盘和任务会跳过、不覆盖；新任务一律先停用，补好凭证再启用。
+        <div className="card-title">配置备份 / 还原</div>
+        <div className="card-sub">把任务、网盘和设置打包带走（换服务器、留底都方便），导入后完整还原、不用再补填任何密码</div>
+        <div className="note-box" style={{ marginTop: 12 }}>
+          <b>导出的文件等于你全部网盘的钥匙</b>：里面有每个网盘的登录密钥、Telegram 机器人令牌和备份加密密码。
+          只许存在你自己的设备上，<b>不要发给任何人、不要通过聊天软件传输、不要上传到公开网盘</b>。
+          导入（还原）时，同名的网盘和任务会以文件为准被覆盖，新的补进来；任务的启用状态和定时也按文件恢复；面板登录账号也会一并还原。
+          （老版本导出的「不含密钥」文件也能导入，只是同名网盘的密钥不会被动、新网盘仍要补填密码。）
         </div>
         <div style={{ marginTop: 14, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
-          <a className="btn btn-ghost btn-sm" href="/api/settings/export">导出配置（下载 JSON）</a>
+          <a className="btn btn-ghost btn-sm" href="/api/settings/export">导出完整备份（下载 JSON）</a>
           <button className="btn btn-ghost btn-sm" disabled={importing} onClick={() => fileRef.current?.click()}>
-            {importing ? '导入中…' : '导入配置（选导出的 JSON）'}
+            {importing ? '导入中…' : '导入备份（选导出的 JSON）'}
           </button>
           <input ref={fileRef} type="file" accept="application/json,.json" style={{ display: 'none' }} onChange={importFile} />
         </div>
