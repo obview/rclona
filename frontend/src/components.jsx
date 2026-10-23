@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { api } from './api.js';
 import { brandOf } from './util.js';
 
@@ -37,12 +37,40 @@ export function Icon({ name, size = 18, sw = 1.8 }) {
 }
 
 // ---------- 圆圈问号详解（CSS 画的小圆圈 + 「?」，悬停/聚焦弹出详解气泡） ----------
+// #34：气泡定位要看视口——纯 CSS 居中时，图标靠屏幕左/右边缘的话气泡会溢出被切
+// （sun 手机实证：靠左的 ? 点开后左列文字出屏）。打开时一步算清：
+// ①按图标位置选对齐（居中会溢出左边→左对齐 hb-left；溢出右边→右对齐 hb-right；
+//   都不溢出才保持居中，桌面端原有表现不变），宽度按气泡真实渲染宽度量，不估；
+// ②对齐后的理论位置若仍溢出（如手机上气泡宽达 86vw、左对齐也会顶破右边），
+//   用 marginLeft 把气泡整体平移回视口内（左右各留 8px）。位置全是解析计算、
+//   不依赖渲染后测量，避免状态更新时序把钳制算错方向。
 export function HelpTip({ text, titleText }) {
+  const [align, setAlign] = useState('');
+  const [shift, setShift] = useState(0);
+  const tipRef = useRef(null);
   if (!text && !titleText) return null;
+  function place() {
+    const tip = tipRef.current;
+    if (!tip) return;
+    const bubble = tip.querySelector('.help-bubble');
+    const r = tip.getBoundingClientRect();
+    const vw = window.innerWidth;
+    const w = bubble?.offsetWidth || Math.min(300, vw * 0.86);
+    const cx = r.left + r.width / 2;
+    const mode = cx - w / 2 < 8 ? 'left' : cx + w / 2 > vw - 8 ? 'right' : '';
+    const modeLeft = mode === 'left' ? r.left - 8
+      : mode === 'right' ? r.left + r.width + 8 - w
+      : cx - w / 2;
+    const clamped = Math.max(8, Math.min(modeLeft, vw - 8 - w));
+    setAlign(mode);
+    setShift(Math.round(clamped - modeLeft));
+  }
   return (
-    <span className="help-tip" tabIndex={0} role="note" aria-label={text || titleText} title={titleText || undefined}>
+    <span ref={tipRef} className="help-tip" tabIndex={0} role="note" aria-label={text || titleText} title={titleText || undefined}
+      onMouseEnter={place} onFocus={place}>
       <span className="help-q">?</span>
-      {text && <span className="help-bubble">{text}</span>}
+      {text && <span className={`help-bubble${align ? ` hb-${align}` : ''}`}
+        style={shift ? { marginLeft: shift } : undefined}>{text}</span>}
     </span>
   );
 }

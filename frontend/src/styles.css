@@ -351,6 +351,14 @@ input, select, textarea { font-family: inherit; font-size: 14px; color: var(--te
   border: 6px solid transparent; border-top-color: #262a45;
 }
 .help-tip:hover .help-bubble, .help-tip:focus .help-bubble { opacity: 1; transform: translateX(-50%) translateY(0); }
+/* #34：视口感知对齐（由 HelpTip 按图标位置加类）：左对齐时气泡左缘贴着图标起，
+   右对齐时气泡右缘贴着图标止，箭头跟着挪到图标正下方；transform 不再带 -50% 横移 */
+.help-bubble.hb-left { left: -8px; transform: translateY(3px); }
+.help-bubble.hb-left::after { left: 10px; }
+.help-bubble.hb-right { left: auto; right: -8px; transform: translateY(3px); }
+.help-bubble.hb-right::after { left: auto; right: 10px; }
+.help-tip:hover .help-bubble.hb-left, .help-tip:focus .help-bubble.hb-left,
+.help-tip:hover .help-bubble.hb-right, .help-tip:focus .help-bubble.hb-right { transform: translateY(0); }
 
 /* ===== 首页仪表盘（#6：学 FlClash 的白卡大圆角 + 状态药丸 + 大数字） ===== */
 .dot-paused { background: #b7bcd2; box-shadow: 0 0 0 3px var(--grey-bg); }
