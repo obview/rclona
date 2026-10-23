@@ -1,4 +1,5 @@
-// #27 A 段：任务级高级选项（旧版本保留 / 删除安全阀 / 限速 / 改名识别）的归一化。
+// #27：任务级高级选项（A 段：旧版本保留 / 删除安全阀 / 限速 / 改名识别；
+// B 段：备份加密开关 crypt）的归一化。
 // 两处共用：server.js 的 validateTask（收用户输入，非法值抛中文错误）与
 // runner.js 运行时读取（老任务没有这些字段——一律给「与从前完全一致」的默认值：
 // 不保留旧版、安全阀不限、不限速、不认改名，绝不因为升级改变老任务行为）。
@@ -18,7 +19,9 @@ export function defaultTaskOptions() {
     versioning: { enabled: false, keepDays: 30 },
     maxDelete: { count: 0, percent: 0 }, // 任一为 0 = 该维度不限
     bwlimit: '',
-    trackRenames: false
+    trackRenames: false,
+    // #27 B 段：备份加密开关（仅开关；密码是全局设置，不进任务，见 crypt.js）
+    crypt: { enabled: false }
   };
 }
 
@@ -37,7 +40,8 @@ export function taskOptionsOf(task) {
       percent: clamp(intOr(m.percent, 0), 0, 100)
     },
     bwlimit: typeof task?.bwlimit === 'string' && BWLIMIT_RE.test(task.bwlimit.trim()) ? task.bwlimit.trim() : '',
-    trackRenames: !!task?.trackRenames
+    trackRenames: !!task?.trackRenames,
+    crypt: { enabled: !!(task?.crypt && typeof task.crypt === 'object' && task.crypt.enabled) }
   };
 }
 
@@ -65,5 +69,9 @@ export function normalizeTaskOptionsInput(b) {
     out.bwlimit = s;
   }
   if (b.trackRenames !== undefined) out.trackRenames = !!b.trackRenames;
+  if (b.crypt !== undefined && b.crypt !== null) {
+    if (typeof b.crypt !== 'object' || Array.isArray(b.crypt)) throw new Error('备份加密的设置格式不对');
+    out.crypt.enabled = !!b.crypt.enabled;
+  }
   return out;
 }

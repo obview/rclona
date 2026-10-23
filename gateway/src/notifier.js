@@ -138,6 +138,22 @@ export async function notifyRemoteRecovered(remoteName) {
   }
 }
 
+// #27 B 段：网盘快满提醒（由每日自检的容量巡检触发，同一轮超限只报一次，口径见 health.js）
+export async function notifyCapacityAlert(remoteName, usedPercent, about, threshold) {
+  try {
+    await sendTelegram([
+      `⚠️ 网盘快满了：${remoteName}`,
+      `网盘「${remoteName}」已用 ${usedPercent}%（提醒阈值 ${threshold}%）。`,
+      about ? `容量：共 ${fmtBytes(about.total)}，已用 ${fmtBytes(about.used ?? 0)}，剩余 ${fmtBytes(about.free ?? 0)}。` : '',
+      '',
+      '备份都是往里写的，满了之后新的备份会失败。处理办法：删掉网盘里不要的旧文件、清理 rclona 的旧版本归档，或者给网盘扩容/换更大的套餐。',
+      '容量降回阈值以下后，如果再涨上去会再提醒你。' + linkLine('/remotes')
+    ].filter(Boolean).join('\n'));
+  } catch (e) {
+    console.error('[notify] 网盘容量提醒发送失败：', e.message);
+  }
+}
+
 export async function sendTestTelegram() {
   const t = tg();
   if (!t.botToken) throw new Error('请先填写机器人令牌（Bot Token）');

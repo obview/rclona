@@ -2,7 +2,70 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
 import { BrandBadge, HelpTip, Icon, Modal } from '../components.jsx';
 import { fieldHelp, s3ProviderLabel, typeLabel } from '../fieldhelp.js';
-import { fmtAgo } from '../util.js';
+import { fmtAgo, fmtBytes } from '../util.js';
+
+// 文件浏览（#27）：逐级看目录，文件可直接下载回本机（经网关流式转发）；文件夹只能进不能下
+function FileBrowser({ remote, onClose }) {
+  const root = remote.type === 'local' ? '/' : '';
+  const [path, setPath] = useState(root);
+  const [dirs, setDirs] = useState([]);
+  const [files, setFiles] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState('');
+
+  async function load(p) {
+    setLoading(true); setErr('');
+    try {
+      const d = await api.get(`/files?remote=${encodeURIComponent(remote.name)}&path=${encodeURIComponent(p)}`);
+      setDirs(d.dirs || []); setFiles(d.files || []); setPath(p);
+    } catch (e) { setErr(e.message); setDirs([]); setFiles([]); }
+    setLoading(false);
+  }
+  useEffect(() => { load(root); /* eslint-disable-next-line */ }, []);
+
+  const segments = path.split('/').filter(Boolean);
+  const isAbs = path.startsWith('/');
+  const joinSegs = (n) => (isAbs ? '/' : '') + segments.slice(0, n).join('/');
+  const parentPath = segments.length <= 1 ? root : joinSegs(segments.length - 1);
+  const dl = (f) => `/api/download?remote=${encodeURIComponent(remote.name)}&path=${encodeURIComponent(f.path)}`;
+  return (
+    <Modal title={`浏览文件：${remote.name}`} sub="点文件夹进去看；文件点右边「下载」就能取回本机。文件夹不能整个下载" wide onClose={onClose}>
+      <div className="crumb-nav">
+        <button onClick={() => load(root)}>{remote.name} 根目录</button>
+        {segments.map((c, i) => (
+          <span key={i}>/ <button onClick={() => load(joinSegs(i + 1))}>{c}</button></span>
+        ))}
+      </div>
+      {err && <div className="login-err">{err}</div>}
+      <div className="folder-list">
+        {path !== root && (
+          <div className="folder-item" onClick={() => load(parentPath)}>
+            <Icon name="up" size={15} /> 返回上一级
+          </div>
+        )}
+        {loading && <div className="folder-item" style={{ color: 'var(--text-3)' }}>加载中…</div>}
+        {!loading && !err && dirs.length === 0 && files.length === 0 && (
+          <div className="folder-item" style={{ color: 'var(--text-3)' }}>（这个文件夹是空的）</div>
+        )}
+        {!loading && dirs.map((d) => (
+          <div className="folder-item" key={d.path} onClick={() => load(d.path)}>
+            <span style={{ color: '#e8a13a' }}><Icon name="folder" size={16} /></span>{d.name}
+            <span style={{ marginLeft: 'auto', color: 'var(--text-3)', fontSize: 12 }}>文件夹（点进去看）</span>
+          </div>
+        ))}
+        {!loading && files.map((f) => (
+          <div className="folder-item" key={f.path} style={{ cursor: 'default' }}>
+            <span style={{ color: 'var(--text-3)' }}><Icon name="drive" size={15} /></span>
+            <span style={{ wordBreak: 'break-all' }}>{f.name}</span>
+            <span style={{ marginLeft: 'auto', color: 'var(--text-3)', fontSize: 12, whiteSpace: 'nowrap' }}>{f.size != null ? fmtBytes(f.size) : ''}</span>
+            <a className="btn btn-ghost btn-sm" href={dl(f)}>下载</a>
+          </div>
+        ))}
+      </div>
+      <div className="hint" style={{ marginTop: 8 }}>在这里只能看和下载，不会改动网盘里的任何文件。</div>
+    </Modal>
+  );
+}
 
 function ProviderForm({ providers, onDone, toast, editing }) {
   const [type, setType] = useState(editing?.type || 's3');
@@ -205,6 +268,7 @@ export default function Remotes({ toast, nav }) {
   const [providers, setProviders] = useState(null);
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState(null);
+  const [browsing, setBrowsing] = useState(null);
   const [testing, setTesting] = useState('');
 
   async function load() {
@@ -268,17 +332,32 @@ export default function Remotes({ toast, nav }) {
                 类型：{typeLabel(r.type)}
                 {r.health?.lastCheckAt && <> · 上次检查 {fmtAgo(r.health.lastCheckAt)}</>}
               </div>
+              {r.health?.about?.total
+                ? (
+                  <div style={{ color: 'var(--text-3)', fontSize: 12.5 }}>
+                    容量：共 {fmtBytes(r.health.about.total)}，已用 {fmtBytes(r.health.about.used ?? 0)}
+                    {r.health.about.free != null && <>，剩余 {fmtBytes(r.health.about.free)}</>}
+                    {r.health.usedPercent != null && <>（已用 {r.health.usedPercent}%）</>}
+                  </div>
+                )
+                : r.health?.lastCheckAt
+                  ? <div style={{ color: 'var(--text-3)', fontSize: 12.5 }}>容量：未知（这个网盘不支持查询容量）</div>
+                  : null}
               {r.health?.remark && (
                 <div style={{ color: 'var(--text-3)', fontSize: 12.5 }}>{r.health.remark}</div>
               )}
             </div>
             <div className="row-actions">
+              {r.needsCredentials && <span className="pill pill-run">待补填凭证</span>}
               {r.paused && <span className="pill pill-off">已暂停</span>}
               {!r.paused && r.health?.status === 'down' && <span className="pill pill-fail">✕ 连接失效</span>}
               {!r.paused && r.health?.status === 'retrying' && <span className="pill pill-run">连接异常</span>}
               {!r.paused && r.health?.status === 'ok' && <span className="pill pill-ok">✓ 连接正常</span>}
               <button className="btn btn-ghost btn-sm" disabled={testing === r.name} onClick={() => test(r)}>
                 <Icon name="refresh" size={13} /> {testing === r.name ? '测试中…' : '测试连接'}
+              </button>
+              <button className="btn btn-ghost btn-sm" onClick={() => setBrowsing(r)}>
+                <Icon name="folder" size={13} /> 浏览文件
               </button>
               <button className="btn btn-ghost btn-sm" onClick={() => setEditing(r)}>
                 <Icon name="edit" size={13} /> 编辑
@@ -303,6 +382,7 @@ export default function Remotes({ toast, nav }) {
           <ProviderForm providers={providers} toast={toast} editing={editing} onDone={() => { setEditing(null); load(); }} />
         </Modal>
       )}
+      {browsing && <FileBrowser remote={browsing} onClose={() => setBrowsing(null)} />}
     </div>
   );
 }

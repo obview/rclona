@@ -79,6 +79,7 @@ function TaskForm({ remotes, initial, onDone, toast }) {
   const [mdPercent, setMdPercent] = useState(initial?.maxDelete ? (initial.maxDelete.percent ?? 0) : (isNew ? 30 : 0));
   const [bwlimit, setBwlimit] = useState(initial?.bwlimit || '');
   const [trackRenames, setTrackRenames] = useState(!!initial?.trackRenames);
+  const [cryptOn, setCryptOn] = useState(!!initial?.crypt?.enabled);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
@@ -146,7 +147,8 @@ function TaskForm({ remotes, initial, onDone, toast }) {
       versioning: { enabled: verOn, keepDays: Number(keepDays) || 30 },
       maxDelete: { count: Math.trunc(Number(mdCount) || 0), percent: Math.trunc(Number(mdPercent) || 0) },
       bwlimit: bwlimit.trim(),
-      trackRenames
+      trackRenames,
+      crypt: { enabled: cryptOn }
     };
     try {
       if (initial?.id) await api.put(`/tasks/${initial.id}`, body);
@@ -372,6 +374,19 @@ function TaskForm({ remotes, initial, onDone, toast }) {
             <HelpTip text="开启后，源里改了名的文件会在目标里直接改名，不重新上传一份，适合经常改名的文件夹。代价：每次同步要多一轮指纹比对；目标网盘不支持时会自动退回重传，不影响备份结果。" />
           </label>
         </div>
+        <div className="adv-row">
+          <label className="adv-check">
+            <input type="checkbox" checked={cryptOn} onChange={(e) => setCryptOn(e.target.checked)} />
+            备份加密
+            <HelpTip text={'开启后，备份到目标的文件会被加密：文件名、文件夹名和文件内容都变成乱码，只有用加密密码才能读回来（往第三方网盘备隐私文件时很有用）。密码不在任务里填——去「设置」页统一填一把，所有开了加密的任务共用；还没设密码时开了这个开关，任务保存会被拦下。\n关掉加密后：新同步的文件是明文，但之前加密过的旧文件不会自动解密（关掉的那一刻起，面板按明文镜像去比对，加密过的旧文件会被当成「目标里多出来的乱码文件」按镜像规则处理——开着删除安全阀更稳妥）。想读回加密的旧文件，把密码填回设置、重新开启加密即可。'} />
+          </label>
+        </div>
+        {cryptOn && (
+          <div className="note-box" style={{ marginTop: 8 }}>
+            ⚠️ <b>加密密码忘了 = 加密过的备份全部无法恢复，谁也救不回来。</b>
+            密码在「设置」页统一填写（不在这个任务里）；请把它记在你保管重要密码的地方，不要只记在脑子里。
+          </div>
+        )}
       </div>
       <div className="note-box" style={{ marginTop: 16 }}>
         同步方式为<strong>纯镜像</strong>：目标网盘会与源保持完全一致 —— 源里新增/修改的文件会同步过去，
@@ -420,6 +435,14 @@ export default function Tasks({ toast }) {
     await api.del(`/tasks/${task.id}`);
     toast('任务已删除');
     load();
+  }
+  async function duplicate(task) {
+    try {
+      const d = await api.post(`/tasks/${task.id}/duplicate`);
+      toast(`已复制出「${d.task.name}」：副本是停用状态，不会自动跑，检查好再启用`);
+      load();
+      setEditing(d.task); // 一键直接进副本的编辑
+    } catch (e) { toast(e.message, true); }
   }
   async function runNow(task) {
     setRunningId(task.id);
@@ -495,6 +518,7 @@ export default function Tasks({ toast }) {
                   : <><Icon name="play" size={13} /> 立即执行</>}
               </button>
               <button className="btn-link" onClick={() => setEditing(t)}>编辑</button>
+              <button className="btn-link" onClick={() => duplicate(t)}>复制</button>
               <button className="btn-link danger" onClick={() => remove(t)}>删除</button>
             </div>
           </div>

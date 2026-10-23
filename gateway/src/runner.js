@@ -4,6 +4,7 @@ import { stageReason, classifyError } from './classify.js';
 import { notifyBackupFailure, notifyFirstScheduledSuccess } from './notifier.js';
 import { pairFilterRules, escapeFilterLiteral } from './filters.js';
 import { taskOptionsOf } from './taskopts.js';
+import { ensureCryptRemote, dropCryptRemote } from './crypt.js';
 import { cfg } from './config.js';
 
 // 备份执行：固定五阶段。先做飞行前检查（把失败定位到阶段），再跑真正的 sync，最后校验
@@ -129,10 +130,10 @@ async function computePairFilters({ task, pair, srcFs, log }) {
   return { filterRules, skipTopDirs };
 }
 
-// #27：清理某组归档区里超过保留天数的日期目录；归档区不存在/清理失败都不算错（返回已清个数）
-async function cleanupArchive(dstRemote, pair, keepDays) {
-  const rel = pair.dst ? `${pair.dst}/${ARCHIVE_DIR}` : ARCHIVE_DIR;
-  const archiveFs = fsSpec(dstRemote, rel);
+// #27：清理某个归档区里超过保留天数的日期目录；归档区不存在/清理失败都不算错（返回已清个数）。
+// 入参直接是归档区的 fs 规格：普通任务是目标网盘下的 .rclona-archive，
+// 开了备份加密的任务要经 crypt 通道访问（归档在加密视图里，见 runTask 的清理循环）。
+async function cleanupArchiveFs(archiveFs, keepDays) {
   let entries;
   try { entries = (await rc.list(archiveFs, '')).list || []; }
   catch { return 0; }
@@ -148,10 +149,14 @@ async function cleanupArchive(dstRemote, pair, keepDays) {
 // 一组映射的五阶段执行（#25）：逻辑与单组时代完全一致，只是失败不再直接终结整次运行，
 // 而是把结果交回 runTask 聚合——一组失败，后面的组照常继续跑。
 // stages/stats 是本组私有的记录格，onProgress 回调把聚合结果刷进运行记录（供界面实时看）。
-async function runPair({ task, pair, log, stages, stats, onProgress }) {
+async function runPair({ task, pair, pairIdx = 0, log, stages, stats, onProgress }) {
   const opts = taskOptionsOf(task);
   const srcFs = fsSpec(task.srcRemote, pair.src);
   const dstFs = fsSpec(task.dstRemote, pair.dst);
+  // #27 B 段：开了备份加密时，阶段 3 起目标改走临时 crypt 通道（effDstFs），
+  // 落盘的文件名/目录名/内容都是加密的；本组跑完在 finally 里拆掉通道。
+  let cryptName = null;
+  let effDstFs = dstFs;
   let pairChanges = null; // #27 变更明细（同步前比对得出），挂到本组结果上
   const setStage = (i, status, durationMs) => {
     stages[i].status = status;
@@ -186,22 +191,36 @@ async function runPair({ task, pair, log, stages, stats, onProgress }) {
     onProgress();
     log(`扫描完成：源共有 ${scan.files} 个文件（${(scan.bytes / 1048576).toFixed(2)} MB）${scan.truncated ? '（文件数过多，已抽样统计）' : ''}`);
 
+    // #27 B 段：备份加密——在连目标之前先架好 crypt 通道，之后所有对目标的操作都走它。
+    // 架不起来（最常见：密码被清掉了）直接判阶段 3 失败，原因就是现成的人话，不再过分类器。
+    if (opts.crypt.enabled) {
+      try {
+        cryptName = await ensureCryptRemote(task, pair, pairIdx);
+        effDstFs = `${cryptName}:`;
+        log('本组已启用备份加密：存到目标的文件名和内容都会加密');
+      } catch (e) {
+        setStage(2, 'failed');
+        log(`备份加密准备失败：${e.message}`);
+        return { ok: false, stageIdx: 2, reasonZh: e.message, errText: String(e.message), changes: pairChanges };
+      }
+    }
+
     // 阶段 3：连接目标网盘 + 容量预检
     t0 = Date.now();
     setStage(2, 'running');
     try {
-      await rc.list(dstFs, '');
+      await rc.list(effDstFs, '');
     } catch (e) {
       if (classifyError(e.message).kind !== 'notfound') return failAt(2, e.message);
       // 目标目录还不存在：这不是故障——rclone sync 本来就会自动建目录，
       // 这里先替用户建好，让首次备份（目标从没建过）也能直接成功；建不出来才算失败
       try {
-        await rc.mkdir(dstFs, '');
+        await rc.mkdir(effDstFs, '');
         log('目标目录不存在，已自动创建');
       } catch (mkErr) { return failAt(2, mkErr.message); }
     }
     try {
-      const ab = await rc.about(dstFs);
+      const ab = await rc.about(effDstFs);
       if (ab && typeof ab.free === 'number' && ab.free >= 0 && ab.free < scan.bytes) {
         return failAt(2, 'insufficient space: 目标可用空间小于源文件总大小');
       }
@@ -214,7 +233,7 @@ async function runPair({ task, pair, log, stages, stats, onProgress }) {
     // 一个文件都不会删（不用 rclone 的 --max-delete：实测它是删到上限才报错的事后闸）。
     // 比对本身失败不阻断备份（记日志、明细留空、安全阀跳过把关）。
     try {
-      const pre = await rc.check(srcFs, dstFs, filterRules);
+      const pre = await rc.check(srcFs, effDstFs, filterRules);
       pairChanges = changesFromCheck(pre);
     } catch (e) {
       log(`同步前比对未完成（${e.message}），直接同步；本次变更明细可能不完整`);
@@ -224,7 +243,7 @@ async function runPair({ task, pair, log, stages, stats, onProgress }) {
       if (opts.maxDelete.count > 0) limits.push(opts.maxDelete.count);
       if (opts.maxDelete.percent > 0) {
         try {
-          const total = await dstFileCount(dstFs);
+          const total = await dstFileCount(effDstFs);
           if (total > 0) limits.push(Math.floor((total * opts.maxDelete.percent) / 100));
         } catch (e) { log(`安全阀的比例上限未生效（数不清目标现有文件数：${e.message}）`); }
       }
@@ -246,10 +265,10 @@ async function runPair({ task, pair, log, stages, stats, onProgress }) {
     // #27 单次调用级配置：BackupDir（被覆盖/删除的文件先进归档区）、TrackRenames（改名不重传）
     const syncCfg = {};
     const archiveDate = dateStrInTz(0);
-    if (opts.versioning.enabled) syncCfg.BackupDir = `${dstFs}/${ARCHIVE_DIR}/${archiveDate}`;
+    if (opts.versioning.enabled) syncCfg.BackupDir = `${effDstFs}/${ARCHIVE_DIR}/${archiveDate}`;
     if (opts.trackRenames) syncCfg.TrackRenames = true;
     let jobid;
-    try { jobid = await rc.syncAsync(srcFs, dstFs, filterRules, syncCfg); }
+    try { jobid = await rc.syncAsync(srcFs, effDstFs, filterRules, syncCfg); }
     catch (e) { return failAt(3, e.message); }
     // #27 限速：_config 的 BwLimit 在 rcd 下实测不生效，只能拨全局开关——
     // 记住原值，同步一结束（成功/失败/超时都算）立刻恢复，避免影响别的任务与自检。
@@ -302,7 +321,7 @@ async function runPair({ task, pair, log, stages, stats, onProgress }) {
     t0 = Date.now();
     setStage(4, 'running');
     try {
-      const chk = await rc.check(srcFs, dstFs, filterRules);
+      const chk = await rc.check(srcFs, effDstFs, filterRules);
       const diffs = [...(chk.differ || []), ...(chk.missingOnSrc || []), ...(chk.missingOnDst || [])];
       const errs = chk.error || [];
       if (errs.length) return failAt(4, errs[0]);
@@ -322,6 +341,9 @@ async function runPair({ task, pair, log, stages, stats, onProgress }) {
     // 兜底：阶段外异常按当前运行中阶段归因
     const idx = stages.findIndex((s) => s.status === 'running');
     return failAt(idx >= 0 ? idx : 3, e.message);
+  } finally {
+    // #27 B 段：本组跑完（成败都算）拆掉临时 crypt 通道，不在 rclone 配置里留加密定义
+    if (cryptName) await dropCryptRemote(cryptName);
   }
 }
 
@@ -417,7 +439,7 @@ export async function runTask(task, trigger = 'manual') {
     const srcFs = fsSpec(task.srcRemote, pair.src);
     const dstFs = fsSpec(task.dstRemote, pair.dst);
     if (pairs.length > 1) log(`—— 第 ${i + 1} 组：${srcFs} → ${dstFs} ——`);
-    const r = await runPair({ task, pair, log, stages: pairStageSets[i], stats: pairStats[i], onProgress: persistProgress });
+    const r = await runPair({ task, pair, pairIdx: i, log, stages: pairStageSets[i], stats: pairStats[i], onProgress: persistProgress });
     pairResults.push({
       src: srcFs,
       dst: dstFs,
@@ -451,14 +473,25 @@ export async function runTask(task, trigger = 'manual') {
     run.changes = agg;
   }
 
-  // #27：开了旧版本保留的任务，每次运行后顺带清理过期归档（失败只记日志，不影响备份结果）
+  // #27：开了旧版本保留的任务，每次运行后顺带清理过期归档（失败只记日志，不影响备份结果）。
+  // 开了备份加密的任务，归档区在加密视图里，清理时要临时再架一次 crypt 通道去访问。
   const taskOpts = taskOptionsOf(task);
   if (taskOpts.versioning.enabled) {
-    for (const pair of pairs) {
+    for (let i = 0; i < pairs.length; i++) {
+      const pair = pairs[i];
+      let tmpCrypt = null;
       try {
-        const n = await cleanupArchive(task.dstRemote, pair, taskOpts.versioning.keepDays);
+        let archiveFs;
+        if (taskOpts.crypt.enabled) {
+          tmpCrypt = await ensureCryptRemote(task, pair, i);
+          archiveFs = `${tmpCrypt}:${ARCHIVE_DIR}`;
+        } else {
+          archiveFs = fsSpec(task.dstRemote, pair.dst ? `${pair.dst}/${ARCHIVE_DIR}` : ARCHIVE_DIR);
+        }
+        const n = await cleanupArchiveFs(archiveFs, taskOpts.versioning.keepDays);
         if (n > 0) log(`已清理 ${n} 个过期归档（超过 ${taskOpts.versioning.keepDays} 天）`);
       } catch (e) { log(`归档清理未完成（${e.message}），下次运行时再试`); }
+      finally { if (tmpCrypt) await dropCryptRemote(tmpCrypt); }
     }
   }
 
@@ -512,7 +545,9 @@ const PREVIEW_CAP = 200;
 export async function previewTask(task) {
   const pairs = pairsOf(task);
   const out = [];
-  for (const pair of pairs) {
+  const taskOpts = taskOptionsOf(task);
+  for (let i = 0; i < pairs.length; i++) {
+    const pair = pairs[i];
     const srcFs = fsSpec(task.srcRemote, pair.src);
     const dstFs = fsSpec(task.dstRemote, pair.dst);
     const item = {
@@ -521,15 +556,22 @@ export async function previewTask(task) {
       counts: { added: 0, updated: 0, deleted: 0 },
       truncated: false, dryRun: null, error: ''
     };
+    let tmpCrypt = null;
     try {
+      // 开了备份加密的任务，预览也要对着加密视图比对（口径与真跑一致）
+      let effDstFs = dstFs;
+      if (taskOpts.crypt.enabled) {
+        tmpCrypt = await ensureCryptRemote(task, pair, i);
+        effDstFs = `${tmpCrypt}:`;
+      }
       const sink = [];
       const { filterRules } = await computePairFilters({ task, pair, srcFs, log: (m) => sink.push(m) });
-      const chk = await rc.check(srcFs, dstFs, filterRules);
+      const chk = await rc.check(srcFs, effDstFs, filterRules);
       const ch = changesFromCheck(chk, PREVIEW_CAP);
       item.added = ch.added; item.updated = ch.updated; item.deleted = ch.deleted;
       item.counts = ch.counts; item.truncated = ch.truncated;
       try {
-        const jobid = await rc.syncAsync(srcFs, dstFs, filterRules, { DryRun: true });
+        const jobid = await rc.syncAsync(srcFs, effDstFs, filterRules, { DryRun: true });
         const deadline = Date.now() + 10 * 60 * 1000;
         let job = null;
         for (;;) {
@@ -544,7 +586,10 @@ export async function previewTask(task) {
         }
       } catch { /* 交叉核对拿不到不影响清单本身 */ }
     } catch (e) {
-      item.error = classifyError(e.message).reasonZh;
+      // 加密准备失败的原因本身就是完整人话（如密码未设置），直接展示，不走分类器
+      item.error = /备份加密/.test(e.message) ? e.message : classifyError(e.message).reasonZh;
+    } finally {
+      if (tmpCrypt) await dropCryptRemote(tmpCrypt);
     }
     out.push(item);
   }

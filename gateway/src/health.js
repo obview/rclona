@@ -1,7 +1,7 @@
 import { store } from './store.js';
 import { rc, fsSpec } from './rc.js';
 import { classifyError } from './classify.js';
-import { notifyRemoteDown, notifyRemoteRecovered } from './notifier.js';
+import { notifyRemoteDown, notifyRemoteRecovered, notifyCapacityAlert } from './notifier.js';
 import { cfg } from './config.js';
 
 // 网盘连通自检状态机：
@@ -11,7 +11,9 @@ import { cfg } from './config.js';
 function blankHealth() {
   return {
     status: 'unknown', failCount: 0, lastCheckAt: null, lastOkAt: null,
-    cause: '', remark: '', downSince: null, notifiedDown: false, nextCheckAt: null
+    cause: '', remark: '', downSince: null, notifiedDown: false, nextCheckAt: null,
+    // #27 B 段：容量快照（about 拿不到的网盘为 null）；capacityAlerted 是防重复提醒的锁存
+    about: null, usedPercent: null, capacityAlerted: false
   };
 }
 export function healthOf(name) {
@@ -90,11 +92,55 @@ export async function testRemote(name, { fromSchedule = false } = {}) {
   }
 }
 
-// 每日全量自检（所有网盘各测一次；失败的进入复测节奏）
+// #27 B 段：容量巡检——搭每日自检的车，顺带问一次 rclone about（总量/已用/剩余），
+// 结果存进健康记录供网盘卡片展示；使用率超过设置里的阈值就发 Telegram 提醒。
+// 防轰炸口径：同一网盘「超限」只报一次（capacityAlerted 锁存），使用率回到阈值以下
+// 才重置锁存、下次再超限才会再报。about 拿不到（网盘不支持/单桶令牌列不了根目录等）
+// 就把快照记为 null，界面显示「未知」，不报错、不提醒。
+export async function checkCapacity(name) {
+  const h = healthOf(name);
+  let about = null;
+  try {
+    const ab = await rc.about(fsSpec(name, ''));
+    if (ab && typeof ab.total === 'number' && ab.total > 0) {
+      about = {
+        total: ab.total,
+        used: typeof ab.used === 'number' ? ab.used : null,
+        free: typeof ab.free === 'number' ? ab.free : null,
+        objects: typeof ab.objects === 'number' ? ab.objects : null,
+        checkedAt: new Date().toISOString()
+      };
+    }
+  } catch { /* 拿不到容量不是故障 */ }
+  h.about = about;
+  h.usedPercent = about && typeof about.used === 'number'
+    ? Math.round((about.used / about.total) * 1000) / 10
+    : null;
+  const thresholdRaw = Number(store.data.settings.capacity?.alertPercent ?? 90);
+  const threshold = Number.isFinite(thresholdRaw) ? Math.min(100, Math.max(0, Math.trunc(thresholdRaw))) : 90;
+  if (h.usedPercent != null && threshold > 0) {
+    if (h.usedPercent >= threshold && !h.capacityAlerted) {
+      h.capacityAlerted = true;
+      store.save();
+      console.log(`[health] 网盘「${name}」容量告警：已用 ${h.usedPercent}%（阈值 ${threshold}%）`);
+      notifyCapacityAlert(name, h.usedPercent, about, threshold).catch(() => {});
+    } else if (h.usedPercent < threshold && h.capacityAlerted) {
+      h.capacityAlerted = false; // 回落到阈值以下：重置，下次超限可再报
+    }
+  } else if (h.capacityAlerted && (h.usedPercent == null || threshold === 0)) {
+    h.capacityAlerted = false; // 查不到容量或提醒被关掉：锁存一并清掉，避免日后误判「已报过」
+  }
+  store.save();
+  return about;
+}
+
+// 每日全量自检（所有网盘各测一次；失败的进入复测节奏；顺带做容量巡检）
 export async function dailyCheckAll() {
   const names = await rc.listRemotes().catch(() => []);
   for (const name of names) {
     await testRemote(name, { fromSchedule: true }).catch(() => {});
+    // 已暂停的网盘不参加定时巡检（含容量），与连通自检同口径
+    if (!store.isPaused(name)) await checkCapacity(name).catch(() => {});
   }
   return names;
 }

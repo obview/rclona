@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../api.js';
 import { HelpTip, Icon } from '../components.jsx';
 
@@ -6,33 +6,76 @@ const TOKEN_HELP = '机器人令牌是建机器人时 Telegram 给你的一串�
 const CHATID_HELP = 'Chat ID 是「把通知发给谁」的编号，就是你自己的 Telegram 数字 ID。获取方法：先给你的机器人发任意一句话（比如「hi」，不发它没法主动找你），然后在 Telegram 里搜索 @userinfobot，它会直接回你的 Id（一串数字），抄到这里。也可以给机器人发完话后打开 https://api.telegram.org/bot<你的令牌>/getUpdates ，在返回内容里找 "chat":{"id": 后面的数字。';
 const ADDRESS_HELP = '填你平时打开这个面板用的地址，比如 https://panel.example.com，或者 http://192.168.1.10:8080。填了之后，备份失败的 Telegram 通知末尾会带一条链接，点一下就直接跳到出错的那条记录。\n留空也没关系：通知照样发，只是不带链接。\n填错了（比如端口写错、域名写错）唯一的影响就是链接点开打不开，通知本身不受影响，回来改对就行。';
 
+const CRYPT_HELP = '这是给「备份加密」用的密码：在任务里打开「备份加密」后，备份到目标网盘的文件会被加密（文件名和内容都是乱码），只有这把密码能解开。所有开了加密的任务共用这一把。\n密码只保存在这台服务器上，界面永远不显示原文；保存时服务器会先把它混淆再入库，不是明文放着。';
+
 export default function Settings({ toast }) {
   const [tg, setTg] = useState(null); // { enabled, chatId, panelAddress, botToken }
   const [tokenSet, setTokenSet] = useState(false);
+  const [capPct, setCapPct] = useState(90);
+  const [cryptPw, setCryptPw] = useState('');
+  const [cryptSet, setCryptSet] = useState(false);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const fileRef = useRef(null);
 
   useEffect(() => {
     api.get('/settings').then((d) => {
       const t = d.settings?.telegram || {};
       setTg({ enabled: !!t.enabled, chatId: t.chatId || '', panelAddress: t.panelAddress || '', botToken: '' });
       setTokenSet(!!d.botTokenSet);
+      setCapPct(d.settings?.capacity?.alertPercent ?? 90);
+      setCryptSet(!!d.cryptPasswordSet);
     }).catch(() => setTg({ enabled: false, chatId: '', panelAddress: '', botToken: '' }));
   }, []);
 
   if (!tg) return <div className="loading-page"><span className="spin" /> 加载中…</div>;
   const set = (k, v) => setTg((x) => ({ ...x, [k]: v }));
-  const payload = () => ({ telegram: { enabled: tg.enabled, chatId: tg.chatId.trim(), panelAddress: tg.panelAddress.trim(), botToken: tg.botToken.trim() } });
+  const payload = () => ({
+    telegram: { enabled: tg.enabled, chatId: tg.chatId.trim(), panelAddress: tg.panelAddress.trim(), botToken: tg.botToken.trim() },
+    capacity: { alertPercent: Math.trunc(Number(capPct) || 0) },
+    ...(cryptPw.trim() ? { backupCryptPassword: cryptPw.trim() } : {})
+  });
 
   async function save() {
     setSaving(true);
     try {
       await api.put('/settings', payload());
       if (tg.botToken.trim()) setTokenSet(true);
+      if (cryptPw.trim()) { setCryptSet(true); setCryptPw(''); }
       setTg((x) => ({ ...x, botToken: '' }));
       toast('设置已保存');
     } catch (e) { toast(e.message, true); }
     setSaving(false);
+  }
+  async function clearCrypt() {
+    if (!confirm('确定清除已保存的备份加密密码吗？清除后，开了加密的任务在重新设置密码之前会备份失败。（已经加密过的备份不受影响，但没有密码就再也解不开了）')) return;
+    try {
+      await api.put('/settings', { clearCryptPassword: true });
+      setCryptSet(false); setCryptPw('');
+      toast('备份加密密码已清除');
+    } catch (e) { toast(e.message, true); }
+  }
+  async function importFile(e) {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    setImporting(true);
+    try {
+      const text = await file.text();
+      let doc;
+      try { doc = JSON.parse(text); } catch { throw new Error('这个文件不是有效的 JSON，确认选的是「导出配置」下载的那个文件'); }
+      const d = await api.post('/settings/import', { data: doc });
+      const r = d.report || {};
+      const parts = [];
+      if (r.remotesAdded?.length) parts.push(`新增网盘 ${r.remotesAdded.length} 个`);
+      if (r.tasksAdded?.length) parts.push(`新增任务 ${r.tasksAdded.length} 个（已先停用，补好凭证再启用）`);
+      if (r.remotesSkipped?.length) parts.push(`同名网盘跳过 ${r.remotesSkipped.length} 个`);
+      if (r.tasksSkipped?.length) parts.push(`同名任务跳过 ${r.tasksSkipped.length} 个`);
+      toast(parts.length ? `导入完成：${parts.join('；')}` : '导入完成：没有新增任何东西（可能都已存在）', false);
+      if (r.errors?.length) toast(`有 ${r.errors.length} 项没导入成功：${r.errors[0]}`, true);
+    } catch (err) { toast(err.message, true); }
+    setImporting(false);
   }
   async function testTelegram() {
     setTesting(true);
@@ -102,6 +145,59 @@ export default function Settings({ toast }) {
             </div>
           </>
         )}
+      </div>
+
+      <div className="card card-pad section-gap">
+        <div className="card-title">备份加密密码 <HelpTip text={CRYPT_HELP} /></div>
+        <div className="card-sub">给任务里的「备份加密」开关用的密码，所有开了加密的任务共用这一把；在这里填，不在任务里填</div>
+        <div className="note-box" style={{ marginTop: 12 }}>
+          ⚠️ <b>这把密码一旦丢失，加密过的备份就全部无法恢复，谁也救不回来。</b>请把它当成重要密码保管（比如记进密码管理器），不要只记在脑子里。
+        </div>
+        <div className="form-grid" style={{ marginTop: 14 }}>
+          <div className="field">
+            <label>备份加密密码 {cryptSet ? '（已设置）' : '（未设置）'}</label>
+            <input className="input" type="password" autoComplete="new-password"
+              value={cryptPw} onChange={(e) => setCryptPw(e.target.value)}
+              placeholder={cryptSet ? '已保存，留空表示不改；要换就填新密码' : '填一个你记得住的长密码'} />
+            <span className="hint">填好后点页面右上角「保存设置」生效；改密码后，之前用旧密码加密的备份要用旧密码才能读，请谨慎更换。</span>
+          </div>
+        </div>
+        {cryptSet && (
+          <div style={{ marginTop: 10 }}>
+            <button className="btn-link danger" onClick={clearCrypt}>清除已保存的密码</button>
+            <span style={{ color: 'var(--text-3)', fontSize: 12.5, marginLeft: 8 }}>清除后开了加密的任务会备份失败，直到重新设置密码。</span>
+          </div>
+        )}
+      </div>
+
+      <div className="card card-pad section-gap">
+        <div className="card-title">网盘容量提醒</div>
+        <div className="card-sub">每天凌晨自检时顺带看一眼每个网盘用了多少；超过下面的比例，就用 Telegram 提醒你一次（降回来再涨上去会再提醒）</div>
+        <div className="form-grid" style={{ marginTop: 14 }}>
+          <div className="field">
+            <label>已用容量达到多少 % 时提醒</label>
+            <input className="input" type="number" min="0" max="100" style={{ width: 120 }}
+              value={capPct} onChange={(e) => setCapPct(e.target.value)} />
+            <span className="hint">默认 90%；填 0 表示关闭容量提醒。改完点右上角「保存设置」。</span>
+          </div>
+        </div>
+      </div>
+
+      <div className="card card-pad section-gap">
+        <div className="card-title">配置导出 / 导入</div>
+        <div className="card-sub">把任务、网盘和设置打包带走（换服务器、留底都方便）</div>
+        <div className="info-box" style={{ marginTop: 12 }}>
+          导出文件<b>不含任何密钥明文</b>：网盘密码/密钥、Telegram 令牌、备份加密密码、面板登录信息都不会写进去。
+          导入后，网盘要到「网盘管理」逐个点「编辑」补填密码/密钥（带「待补填凭证」标记的就是还没补的），备份加密密码要在这里重新填。
+          导入按名字合并：同名的网盘和任务会跳过、不覆盖；新任务一律先停用，补好凭证再启用。
+        </div>
+        <div style={{ marginTop: 14, display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+          <a className="btn btn-ghost btn-sm" href="/api/settings/export">导出配置（下载 JSON）</a>
+          <button className="btn btn-ghost btn-sm" disabled={importing} onClick={() => fileRef.current?.click()}>
+            {importing ? '导入中…' : '导入配置（选导出的 JSON）'}
+          </button>
+          <input ref={fileRef} type="file" accept="application/json,.json" style={{ display: 'none' }} onChange={importFile} />
+        </div>
       </div>
 
     </div>

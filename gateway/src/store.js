@@ -35,7 +35,11 @@ const DEFAULT_STATS = () => ({
 const DEFAULTS = () => ({
   auth: null, // {user, salt, hash} —— 首次启动由环境变量或设置向导生成
   settings: {
-    telegram: { enabled: false, botToken: '', chatId: '', panelAddress: '' }
+    telegram: { enabled: false, botToken: '', chatId: '', panelAddress: '' },
+    // #27 B 段：备份加密密码只存 rclone obscure 之后的串（不是明文）；UI 只报已设/未设
+    backupCrypt: { password: '' },
+    // #27 B 段：网盘容量提醒阈值（已用百分比，0 = 关闭提醒）
+    capacity: { alertPercent: 90 }
   },
   tasks: [],
   runs: [],
@@ -58,7 +62,9 @@ export const store = {
         this.data = { ...DEFAULTS(), ...parsed };
         // 设置：只保留现行结构（老版本的邮箱/SMTP 设置直接丢弃，改用 Telegram）
         this.data.settings = {
-          telegram: { ...DEFAULTS().settings.telegram, ...(parsed.settings?.telegram || {}) }
+          telegram: { ...DEFAULTS().settings.telegram, ...(parsed.settings?.telegram || {}) },
+          backupCrypt: { ...DEFAULTS().settings.backupCrypt, ...(parsed.settings?.backupCrypt || {}) },
+          capacity: { ...DEFAULTS().settings.capacity, ...(parsed.settings?.capacity || {}) }
         };
         this.data.remoteState = parsed.remoteState || {};
         // 任务：计划结构归一化（老结构 weekly 的单选 weekday → weekdays 数组等），补锚点
@@ -75,6 +81,7 @@ export const store = {
           t.maxDelete = o.maxDelete;
           t.bwlimit = o.bwlimit;
           t.trackRenames = o.trackRenames;
+          t.crypt = o.crypt;
         }
         // 累计计数：老数据没有就从已有运行记录里播种一次
         if (parsed.stats) {
@@ -139,6 +146,15 @@ export const store = {
       st.bytes += run.stats?.bytes || 0;
       st.files += run.stats?.transferred || 0;
     }
+    this.save();
+  },
+  // #27 B 段：导入配置时凭据被剥掉的网盘打「待补填」标记，用户在编辑里补存后清除
+  needsCredentials(name) {
+    return !!this.data.remoteState?.[name]?.needsCredentials;
+  },
+  setNeedsCredentials(name, flag) {
+    if (!this.data.remoteState) this.data.remoteState = {};
+    this.data.remoteState[name] = { ...(this.data.remoteState[name] || {}), needsCredentials: !!flag };
     this.save();
   },
   isPaused(name) {

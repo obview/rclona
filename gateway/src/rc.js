@@ -108,6 +108,28 @@ export const rc = {
   stats: (group) => call('core/stats', { group }, 15000)
 };
 
+// ---------- 一次性 rclone 子进程（不经常驻内存，用完即走） ----------
+// 密码混淆：rclone obscure 把明文密码转成可存进配置的串（crypt 密码入库前过这一步，库里永不存明文）
+export function obscureValue(plain) {
+  return new Promise((resolve, reject) => {
+    const p = spawn(cfg.rcloneBin, ['obscure', String(plain)], { stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '', err = '';
+    p.stdout.on('data', (d) => { out += d; });
+    p.stderr.on('data', (d) => { err += d; });
+    p.on('error', (e) => reject(new Error(`无法运行 rclone：${e.message}`)));
+    p.on('close', (code) => {
+      if (code === 0 && out.trim()) resolve(out.trim());
+      else reject(new Error(`密码处理失败：${err.trim() || `rclone 退出码 ${code}`}`));
+    });
+  });
+}
+// 流式取文件：rclone cat 把文件内容写到 stdout，调用方直接把 stdout 管道到 HTTP 响应——
+// 全程不把文件读进内存（#27 面板下载）。用与 rcd 相同的配置文件，支持包括 crypt 在内的所有 remote。
+export function spawnCat(spec) {
+  const confPath = path.join(cfg.dataDir, 'rclone.conf');
+  return spawn(cfg.rcloneBin, ['cat', `--config=${confPath}`, spec], { stdio: ['ignore', 'pipe', 'pipe'] });
+}
+
 // 把 rc 的 provider 定义压成前端表单需要的形状
 export function normalizeProviders(raw) {
   const out = {};

@@ -1,6 +1,7 @@
 // rclona 网关端到端自测（无需真实网盘：本地目录 remote + 假 WebDAV 服务）
 // 运行：npm run test:e2e（需要 RCLONE_BIN 指向 rclone 二进制，默认用仓库 .tools/rclone）
 import { spawn } from 'node:child_process';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import http from 'node:http';
@@ -1237,6 +1238,208 @@ async function main() {
     });
     ok(badPct.status !== 200 && /安全阀|比例/.test(badPct.data?.error || ''), '安全阀比例越界时建任务被拒',
       badPct.data?.error || `status=${badPct.status}`);
+
+    console.log('== 21. #27 B 段：面板取回文件 / 备份加密 / 容量提醒 / 任务复制与配置导出导入 ==');
+    const dataDir21 = path.join(T, 'data');
+    const storeText21 = () => fs.readFileSync(path.join(dataDir21, 'rclona.json'), 'utf8');
+    const rcloneCli = (args) => new Promise((resolve, reject) => {
+      const p = spawn(RCLONE_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+      const chunks = []; let err = '';
+      p.stdout.on('data', (d) => chunks.push(d));
+      p.stderr.on('data', (d) => { err += d; });
+      p.on('error', reject);
+      p.on('close', (code) => (code === 0 ? resolve(Buffer.concat(chunks)) : reject(new Error(`rclone CLI 失败(${code})：${err.slice(-300)}`))));
+    });
+
+    // 21a 文件浏览与流式下载：目录+文件一起列、文件能下、文件夹被拦、未登录被拒
+    const dlSrc = path.join(T, 'dl21', 'files');
+    fs.mkdirSync(path.join(dlSrc, 'inner'), { recursive: true });
+    fs.writeFileSync(path.join(dlSrc, 'note.txt'), 'download me please');
+    fs.writeFileSync(path.join(dlSrc, 'inner', 'deep.txt'), 'deep content');
+    const bigBuf = Buffer.alloc(3 * 1024 * 1024);
+    for (let i = 0; i < bigBuf.length; i++) bigBuf[i] = i % 251;
+    fs.writeFileSync(path.join(dlSrc, 'big.bin'), bigBuf);
+    const filesRes = await api('GET', `/api/files?remote=tsrc&path=${encodeURIComponent(dlSrc)}`);
+    const fNote = (filesRes.data?.files || []).find((f) => f.name === 'note.txt');
+    ok(filesRes.status === 200 && !!fNote && fNote.size === 18
+      && (filesRes.data.dirs || []).some((d) => d.name === 'inner'),
+      '文件浏览同时列出文件（带大小）与子目录');
+    const dlFetch = (p) => fetch(BASE + p, { headers: { Cookie: cookie } });
+    const dl1 = await dlFetch(`/api/download?remote=tsrc&path=${encodeURIComponent(path.join(dlSrc, 'note.txt'))}`);
+    ok(dl1.status === 200 && (await dl1.text()) === 'download me please', '小文件下载内容一致');
+    ok((dl1.headers.get('content-disposition') || '').includes('note.txt'), '下载响应带正确的文件名头');
+    const dlBig = await dlFetch(`/api/download?remote=tsrc&path=${encodeURIComponent(path.join(dlSrc, 'big.bin'))}`);
+    const bigGot = Buffer.from(await dlBig.arrayBuffer());
+    ok(dlBig.status === 200 && bigGot.equals(bigBuf), '3MB 大文件流式下载内容逐字节一致');
+    const dlDir = await dlFetch(`/api/download?remote=tsrc&path=${encodeURIComponent(dlSrc)}`);
+    const dlDirBody = await dlDir.json().catch(() => ({}));
+    ok(dlDir.status === 400 && /文件夹/.test(dlDirBody.error || ''), '下载文件夹被拦下并给出中文提示', dlDirBody.error || `status=${dlDir.status}`);
+    const dlAnon = await fetch(`${BASE}/api/download?remote=tsrc&path=${encodeURIComponent(path.join(dlSrc, 'note.txt'))}`);
+    ok(dlAnon.status === 401, '未登录下载被拒（401）');
+
+    // 21b 备份加密：没设密码时建任务被门禁拦下；设密码后真跑——落盘乱码、crypt 读回原文
+    const crSrc = path.join(T, 'crypt21', 'src'); const crDst = path.join(T, 'crypt21', 'dst');
+    fs.mkdirSync(path.join(crSrc, 'diary'), { recursive: true });
+    fs.writeFileSync(path.join(crSrc, 'secret.txt'), 'top secret content');
+    fs.writeFileSync(path.join(crSrc, 'diary', 'day1.txt'), 'dear diary');
+    const gateRes = await api('POST', '/api/tasks', {
+      name: '加密门禁', srcRemote: 'tsrc', dstRemote: 'tdst',
+      pairs: [{ src: crSrc, dst: crDst }], schedule: { type: 'daily', time: '04:00' }, crypt: { enabled: true }
+    });
+    ok(gateRes.status !== 200 && /加密密码/.test(gateRes.data?.error || ''),
+      '没设加密密码时，开启加密的任务保存被拦下并说明去哪设', gateRes.data?.error || `status=${gateRes.status}`);
+    const CRYPT_PW = 'e2e-crypt-pw-21';
+    const setPw = await api('PUT', '/api/settings', { backupCryptPassword: CRYPT_PW });
+    ok(setPw.status === 200, '备份加密密码可经设置接口保存');
+    const getSet21 = await api('GET', '/api/settings');
+    ok(getSet21.data.cryptPasswordSet === true && !JSON.stringify(getSet21.data).includes(CRYPT_PW),
+      '设置回读只报「已设置」、不含密码明文');
+    ok(!storeText21().includes(CRYPT_PW), '本地记录文件里没有加密密码明文（只存混淆串）');
+    const cryptTaskRes = await api('POST', '/api/tasks', {
+      name: '加密备份', srcRemote: 'tsrc', dstRemote: 'tdst',
+      pairs: [{ src: crSrc, dst: crDst }], schedule: { type: 'daily', time: '04:00' }, crypt: { enabled: true }
+    });
+    ok(cryptTaskRes.status === 200, '设好密码后加密任务可以创建');
+    const cryptTaskId = cryptTaskRes.data.task.id;
+    ok(!JSON.stringify((await api('GET', '/api/tasks')).data).includes(CRYPT_PW), '任务数据里不含加密密码（任务只存开关）');
+    await api('POST', `/api/tasks/${cryptTaskId}/run`);
+    const cryptRun = await waitFor(async () => {
+      const d = await api('GET', `/api/runs?taskId=${cryptTaskId}`);
+      const r = d.data.runs?.[0];
+      return r && r.status !== 'running' ? r : null;
+    }, 60000);
+    ok(cryptRun.status === 'success', '加密任务运行成功（五阶段全过，含校验）', `状态=${cryptRun.status} ${cryptRun.reasonZh || ''}`);
+    const diskNames = [];
+    (function walk(d) {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        if (e.isDirectory()) walk(path.join(d, e.name)); else diskNames.push(e.name);
+      }
+    })(crDst);
+    ok(diskNames.length === 2 && !diskNames.includes('secret.txt')
+      && diskNames.every((n) => !n.includes('secret') && !n.includes('day1')),
+      '目标磁盘上的文件名是加密乱码（找不到原文名）', diskNames.join(','));
+    const rawFiles = await api('GET', `/api/files?remote=tdst&path=${encodeURIComponent(crDst)}`);
+    ok((rawFiles.data?.files || []).length >= 1 && !(rawFiles.data.files || []).some((f) => f.name === 'secret.txt'),
+      '面板直接浏览目标看到的也是乱码名（确实加密落盘）');
+    const remotesAfterCrypt = await api('GET', '/api/remotes');
+    ok(!(remotesAfterCrypt.data.remotes || []).some((r) => r.name.startsWith('rclonacrypt-')),
+      '加密任务跑完后临时加密通道已拆除（不留在网盘列表里）');
+    // 读回验证：手动建一个同密码的 crypt remote 指到 crDst，经 rcd 列表与 CLI cat 验原文
+    const obscured21 = (await rcloneCli(['obscure', CRYPT_PW])).toString('utf8').trim();
+    await rcdCall('config/create', {
+      name: 'treadcrypt', type: 'crypt',
+      parameters: { remote: `tdst:${crDst}`, filename_encryption: 'standard', directory_name_encryption: 'true', password: obscured21 }
+    });
+    const crList = await rcdCall('operations/list', { fs: 'treadcrypt:', remote: '', opt: { recurse: true } });
+    const crPaths = (crList.list || []).filter((e) => !e.IsDir).map((e) => e.Path).sort();
+    ok(JSON.stringify(crPaths) === JSON.stringify(['diary/day1.txt', 'secret.txt']),
+      '经 crypt 读回的目录结构与原文件名一致', crPaths.join(','));
+    const catOut = await rcloneCli(['cat', `--config=${path.join(dataDir21, 'rclone.conf')}`, 'treadcrypt:secret.txt']);
+    ok(catOut.toString('utf8') === 'top secret content', '经 crypt 读回的文件内容与原文一致');
+    await rcdCall('config/delete', { name: 'treadcrypt' });
+
+    // 21c 容量提醒：阈值压到 1%，重启触发每日自检（连通+容量），应存下容量并只发一次提醒
+    const capBad = await api('PUT', '/api/settings', { capacity: { alertPercent: 101 } });
+    ok(capBad.status === 400 && /容量/.test(capBad.data?.error || ''), '容量阈值越界（101）被拒', capBad.data?.error || '');
+    const capPut = await api('PUT', '/api/settings', { capacity: { alertPercent: 1 } });
+    ok(capPut.status === 200, '容量阈值可保存（压到 1% 以便触发提醒）');
+    // 本地网盘的容量 = 网关所在磁盘：这台机器磁盘只用了约 0.7%，够不到 1% 的整数阈值下限，
+    // 提醒永远不会触发——临时写一个 3GB 填充文件把使用率顶过阈值，测完在 finally 里删掉。
+    // 注意要写随机数据：写重复字节会被文件系统压缩/去重，物理占用涨不上去（实测踩过）。
+    const fillPath = path.join(ROOT, '.e2e-capacity-fill.bin');
+    const fillFd = fs.openSync(fillPath, 'w');
+    for (let i = 0; i < 48; i++) fs.writeSync(fillFd, crypto.randomBytes(64 * 1024 * 1024));
+    fs.closeSync(fillFd);
+    try {
+      gw.kill('SIGTERM');
+      await sleep(1200);
+      gw.kill('SIGKILL');
+      env.HEALTH_DAILY_TIME = '00:00'; // 让重启后的第一个 tick 就跑每日自检
+      cookie = '';
+      gw = spawnGw();
+      await waitFor(async () => (await api('GET', '/api/auth/me')).status === 200, 20000);
+      // 注意：第 18 节已把面板密码改成 newpass456，重登录要用新密码
+      const relogin21 = await api('POST', '/api/auth/login', { user: 'tester', password: 'newpass456' });
+      ok(relogin21.status === 200, '容量段重启后可重新登录');
+      const capRemote = await waitFor(async () => {
+        const d = await api('GET', '/api/remotes');
+        const r = (d.data.remotes || []).find((x) => x.name === 'tsrc');
+        return r?.health?.about?.total > 0 ? r : null;
+      }, 60000);
+      ok(!!capRemote, '每日自检顺带存下了网盘容量（tsrc 总量可读）', JSON.stringify(capRemote?.health?.about || {}));
+      ok(typeof capRemote.health.usedPercent === 'number' && capRemote.health.usedPercent >= 1,
+        '容量使用率已算出且 ≥1%（与 1% 阈值同口径）', `usedPercent=${capRemote.health.usedPercent}`);
+      const tgCap = await waitFor(async () => tgHas('网盘快满了', 'tsrc') || null, 20000).catch(() => null);
+      ok(!!tgCap, '容量超阈值已发 Telegram 提醒');
+      ok(capRemote.health.capacityAlerted === true, '提醒锁存已置位（同一轮超限不会重复轰炸）');
+    } finally {
+      fs.rmSync(fillPath, { force: true });
+    }
+    await api('PUT', '/api/settings', { capacity: { alertPercent: 90 } }); // 恢复默认，避免影响后续
+
+    // 21d 任务复制：新 ID、名字带副本、先停用、配置一致、一键可编辑（返回完整任务）
+    const dupSrc = await api('POST', '/api/tasks', {
+      name: '复制源任务', srcRemote: 'tsrc', dstRemote: 'tdst',
+      pairs: [{ src: srcDir, dst: dstDir }], schedule: { type: 'daily', time: '04:30' }
+    });
+    const dupRes = await api('POST', `/api/tasks/${dupSrc.data.task.id}/duplicate`);
+    const dupTask = dupRes.data?.task;
+    ok(dupRes.status === 200 && !!dupTask && dupTask.id !== dupSrc.data.task.id && /（副本）$/.test(dupTask.name),
+      '任务复制生成新任务（新 ID、名字带「副本」）', dupTask?.name || '');
+    ok(dupTask.enabled === false && dupTask.nextRunAt === null && dupTask.lastStatus === null,
+      '副本先停用、无下次执行时间（不会自动跑）');
+    ok(JSON.stringify(dupTask.pairs) === JSON.stringify(dupSrc.data.task.pairs), '副本的映射配置与原任务一致');
+
+    // 21e 导出：带密码的网盘只记「哪些密码字段有值」，任何密钥明文都不得出现在文件里
+    const davRes = await api('POST', '/api/remotes', {
+      name: 'texportdav', type: 'webdav',
+      config: { url: 'http://127.0.0.1:9/dav', user: 'u1', pass: 'dav-secret-pw-21' }
+    });
+    ok(davRes.status === 200, '带密码的 WebDAV 网盘创建成功（连不通不影响创建）');
+    ok(!fs.readFileSync(path.join(dataDir21, 'rclone.conf'), 'utf8').includes('dav-secret-pw-21'),
+      '前置：rclone 配置文件里存的也不是密码明文');
+    const expRes = await fetch(`${BASE}/api/settings/export`, { headers: { Cookie: cookie } });
+    const expText = await expRes.text();
+    ok(expRes.status === 200 && (expRes.headers.get('content-disposition') || '').includes('rclona-config'),
+      '导出接口返回配置文件下载');
+    ok(!expText.includes('TESTTOKEN123') && !expText.includes('dav-secret-pw-21')
+      && !expText.includes(CRYPT_PW) && !expText.includes('testpass123'),
+      '导出文件不含任何密钥明文（Telegram 令牌/WebDAV 密码/加密密码/面板密码）');
+    const expDoc = JSON.parse(expText);
+    const expDav = (expDoc.remotes || []).find((r) => r.name === 'texportdav');
+    ok(!!expDav && (expDav.secrets || []).includes('pass') && !('pass' in (expDav.config || {})) && expDav.config?.user === 'u1',
+      '导出里 WebDAV 网盘只记「pass 已设置过」、不含其值，非敏感字段保留');
+    ok((expDoc.tasks || []).some((t) => t.name === '复制源任务（副本）') && expDoc.settings?.telegram?.chatId === '424242',
+      '导出含任务清单与非敏感设置');
+
+    // 21f 导入往返：删掉副本任务与 texportdav 后导入应都回来（网盘带待补填标记、任务停用）；
+    // 再导一次应全部同名跳过；坏文件/坏版本被拒
+    await api('DELETE', `/api/tasks/${dupTask.id}`);
+    await api('DELETE', '/api/remotes/texportdav');
+    const imp1 = await api('POST', '/api/settings/import', { data: expDoc });
+    const rep1 = imp1.data?.report || {};
+    ok(imp1.status === 200 && rep1.remotesAdded?.includes('texportdav') && rep1.tasksAdded?.includes('复制源任务（副本）'),
+      '导入把删掉的网盘与任务都加了回来', JSON.stringify(rep1));
+    const remotesAfterImp = await api('GET', '/api/remotes');
+    const davBack = (remotesAfterImp.data.remotes || []).find((r) => r.name === 'texportdav');
+    ok(!!davBack && davBack.needsCredentials === true, '导入回来的网盘带「待补填凭证」标记');
+    const tasksAfterImp = await api('GET', '/api/tasks');
+    const dupBack = tasksAfterImp.data.tasks.find((t) => t.name === '复制源任务（副本）');
+    ok(!!dupBack && dupBack.enabled === false && dupBack.id !== dupTask.id, '导入回来的任务是新 ID 且处于停用状态');
+    const imp2 = await api('POST', '/api/settings/import', { data: expDoc });
+    const rep2 = imp2.data?.report || {};
+    ok((rep2.remotesAdded || []).length === 0 && (rep2.tasksAdded || []).length === 0
+      && rep2.remotesSkipped?.includes('texportdav') && rep2.tasksSkipped?.includes('复制源任务（副本）'),
+      '重复导入全部同名跳过（不覆盖、不产生重复）', JSON.stringify(rep2));
+    const tasksFinal21 = await api('GET', '/api/tasks');
+    ok(tasksFinal21.data.tasks.filter((t) => t.name === '复制源任务（副本）').length === 1,
+      '重复导入后同名任务仍只有一个（无重复条目）');
+    const impBad1 = await api('POST', '/api/settings/import', { data: { app: 'not-rclona', version: 1 } });
+    ok(impBad1.status === 400 && /rclona/.test(impBad1.data?.error || ''), '非 rclona 文件被拒并给出中文原因', impBad1.data?.error || '');
+    const impBad2 = await api('POST', '/api/settings/import', { data: { app: 'rclona', version: 99 } });
+    ok(impBad2.status === 400 && /版本/.test(impBad2.data?.error || ''), '不支持的导出版本被拒', impBad2.data?.error || '');
+    const impBad3 = await api('POST', '/api/settings/import', { data: '就是一个字符串' });
+    ok(impBad3.status === 400, '结构不对的导入内容被拒');
 
     console.log(failures === 0 ? '\n全部自测通过 ✅' : `\n有 ${failures} 项未通过 ❌`);
   } finally {
