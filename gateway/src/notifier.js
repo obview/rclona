@@ -2,6 +2,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { store } from './store.js';
 import { cfg } from './config.js';
+import { scheduleText } from './schedule.js';
 
 // 通知走 Telegram 机器人：配置来自设置页（Bot Token + Chat ID，存本地记录）
 function tg() {
@@ -82,6 +83,32 @@ export async function notifyBackupFailure(run) {
     ].join('\n'));
   } catch (e) {
     console.error('[notify] 备份失败通知发送失败：', e.message);
+  }
+}
+
+function fmtBytes(n) {
+  const v0 = Number(n) || 0;
+  if (v0 < 1024) return `${v0} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let v = v0 / 1024, i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(v >= 100 ? 0 : 1)} ${units[i]}`;
+}
+
+// #24：某个任务第一次「按定时计划自动跑成功」时报喜一次——让用户确信定时链路真的通了。
+// 只由 runner 在 trigger==='schedule' 且成功、且任务未打过标记时调用；手动成功永不触发。
+export async function notifyFirstScheduledSuccess(run, task) {
+  try {
+    await sendTelegram([
+      `✅ 定时备份首次成功：${run.taskName}`,
+      `源网盘 → 目标网盘：${task.srcRemote} → ${task.dstRemote}`,
+      `本次传输：${run.stats?.transferred ?? 0} 个文件 / ${fmtBytes(run.stats?.bytes ?? 0)}`,
+      `计划：${scheduleText(task.schedule)}`,
+      '',
+      '这是这个任务第一次按定时计划自动跑成功，之后会照这个计划继续自动备份，不用再手动管它。' + linkLine(`/runs?focus=${run.id}`)
+    ].join('\n'));
+  } catch (e) {
+    console.error('[notify] 定时备份首次成功通知发送失败：', e.message);
   }
 }
 

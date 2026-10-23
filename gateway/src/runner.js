@@ -1,7 +1,7 @@
 import { store, newId, pairsOf } from './store.js';
 import { rc, fsSpec } from './rc.js';
 import { stageReason, classifyError } from './classify.js';
-import { notifyBackupFailure } from './notifier.js';
+import { notifyBackupFailure, notifyFirstScheduledSuccess } from './notifier.js';
 import { cfg } from './config.js';
 
 // 备份执行：固定五阶段。先做飞行前检查（把失败定位到阶段），再跑真正的 sync，最后校验
@@ -349,5 +349,12 @@ export async function runTask(task, trigger = 'manual') {
   store.bumpStats(run);
   running.delete(task.id);
   console.log(`[runner] 任务「${task.name}」完成：传输 ${run.stats.transferred ?? 0} 个文件`);
+  // #24：定时触发且成功、且这个任务从没报过喜 → 发一条「首次定时成功」并打持久标记，
+  // 之后定时再成功不再发；手动成功永不发。先打标记再发送，避免异常重试导致重复报喜。
+  if (trigger === 'schedule' && tt && !tt.firstSuccessNotified) {
+    tt.firstSuccessNotified = true;
+    store.save();
+    notifyFirstScheduledSuccess(run, tt).catch(() => {});
+  }
   return run;
 }

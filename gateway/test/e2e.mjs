@@ -810,6 +810,98 @@ async function main() {
     ok(emptyPairs.status !== 200 && /至少要有一组/.test(emptyPairs.data?.error || ''),
       'pairs 为空数组被拒绝（中文提示）', emptyPairs.data?.error || '');
 
+    console.log('== 17. #24：定时备份首次成功才发 Telegram，手动不发、只发一次 ==');
+    // 设置带面板地址，便于一并验证首次成功通知里的记录直达链接
+    await api('PUT', '/api/settings', {
+      telegram: { enabled: true, botToken: 'TESTTOKEN123', chatId: '424242', panelAddress: 'http://panel.example.com:8080' }
+    });
+    const scSrc = path.join(T, 'sched', 'data');
+    const scDst = path.join(T, 'sched', 'bak');
+    fs.mkdirSync(scSrc, { recursive: true });
+    fs.writeFileSync(path.join(scSrc, 'hello.txt'), 'scheduled hello');
+    const scTask = await api('POST', '/api/tasks', {
+      name: '定时首成功', srcRemote: 'tsrc', srcPath: scSrc,
+      dstRemote: 'tdst', dstPath: scDst, schedule: { type: 'daily', time: '04:00' }
+    });
+    const scBad = await api('POST', '/api/tasks', {
+      name: '定时坏任务', srcRemote: 'tsrc', srcPath: '/no/such/sched-dir',
+      dstRemote: 'tdst', dstPath: scDst, schedule: { type: 'daily', time: '04:00' }
+    });
+    const firstOkMsgs = () => tgMessages.filter((m) => m.text.includes('定时备份首次成功：定时首成功'));
+
+    // 手动跑一次：成功，但绝不能发「首次成功」通知，任务也不能被打标记
+    await api('POST', `/api/tasks/${scTask.data.task.id}/run`);
+    const scManualRun = await waitFor(async () => {
+      const d = await api('GET', `/api/runs?taskId=${scTask.data.task.id}`);
+      const r = d.data.runs?.[0];
+      return r && r.status !== 'running' ? r : null;
+    }, 60000);
+    ok(scManualRun.status === 'success' && scManualRun.trigger === 'manual',
+      '前置：手动执行成功且记录带 manual 来源标记');
+    await sleep(1200);
+    ok(firstOkMsgs().length === 0, '手动成功不发「定时备份首次成功」通知');
+
+    // 工具：停网关 → 改数据文件 → 重启并重新登录（与第 12 节同款手法）
+    const restartGwWith = async (mutate) => {
+      gw.kill('SIGTERM');
+      await sleep(1200);
+      gw.kill('SIGKILL');
+      const dataFile = path.join(T, 'data', 'rclona.json');
+      const saved = JSON.parse(fs.readFileSync(dataFile, 'utf8'));
+      mutate(saved);
+      fs.writeFileSync(dataFile, JSON.stringify(saved, null, 2));
+      cookie = '';
+      gw = spawnGw();
+      await waitFor(async () => (await api('GET', '/api/auth/me')).status === 200, 20000);
+      await api('POST', '/api/auth/login', { user: 'tester', password: 'testpass123' });
+    };
+    const pastIso = () => new Date(Date.now() - 60000).toISOString();
+
+    // 把两个任务的 nextRunAt 拨到过去 → 重启后调度器会以 schedule 来源触发它们
+    await restartGwWith((saved) => {
+      for (const t of saved.tasks) {
+        if (t.id === scTask.data.task.id || t.id === scBad.data.task.id) t.nextRunAt = pastIso();
+      }
+    });
+    const scSchedRun = await waitFor(async () => {
+      const d = await api('GET', `/api/runs?taskId=${scTask.data.task.id}`);
+      const r = (d.data.runs || []).find((x) => x.trigger === 'schedule');
+      return r && r.status !== 'running' ? r : null;
+    }, 90000);
+    ok(scSchedRun.status === 'success', '定时触发的运行成功且记录带 schedule 来源标记',
+      `状态=${scSchedRun.status}`);
+    const tgFirst = await waitFor(async () => firstOkMsgs()[0] || null, 15000).catch(() => null);
+    ok(!!tgFirst, '定时首次成功已通过 Telegram 发出');
+    ok(tgFirst && tgFirst.text.includes('tsrc → tdst') && tgFirst.text.includes('本次传输')
+      && tgFirst.text.includes('计划：每天 04:00')
+      && tgFirst.text.includes(`http://panel.example.com:8080/runs?focus=${scSchedRun.id}`),
+      '首次成功通知内容齐全（网盘方向/传输统计/人话计划/记录链接）',
+      tgFirst ? tgFirst.text.split('\n').slice(0, 4).join(' | ') : '未收到');
+    const scBadRun = await waitFor(async () => {
+      const d = await api('GET', `/api/runs?taskId=${scBad.data.task.id}`);
+      const r = (d.data.runs || []).find((x) => x.trigger === 'schedule');
+      return r && r.status !== 'running' ? r : null;
+    }, 90000);
+    ok(scBadRun.status === 'failed', '定时触发的坏任务按预期失败');
+    const tgBad = await waitFor(async () => tgHas('备份失败', '定时坏任务') || null, 15000).catch(() => null);
+    ok(!!tgBad, '定时失败仍按旧规则发失败通知（规则未被 #24 影响）');
+    const scTaskNow = (await api('GET', '/api/tasks')).data.tasks.find((t) => t.id === scTask.data.task.id);
+    ok(scTaskNow?.firstSuccessNotified === true, '任务已持久打上 firstSuccessNotified 标记');
+
+    // 再拨一次到点：第二次定时成功不应再发首次成功通知
+    await restartGwWith((saved) => {
+      for (const t of saved.tasks) if (t.id === scTask.data.task.id) t.nextRunAt = pastIso();
+    });
+    const scSchedRun2 = await waitFor(async () => {
+      const d = await api('GET', `/api/runs?taskId=${scTask.data.task.id}`);
+      const r = (d.data.runs || []).find((x) => x.trigger === 'schedule' && x.id !== scSchedRun.id);
+      return r && r.status !== 'running' ? r : null;
+    }, 90000);
+    ok(scSchedRun2.status === 'success', '第二次定时运行同样成功');
+    await sleep(2000);
+    ok(firstOkMsgs().length === 1, '第二次定时成功不再发首次成功通知（总共仍只有 1 条）',
+      `实际 ${firstOkMsgs().length} 条`);
+
     console.log(failures === 0 ? '\n全部自测通过 ✅' : `\n有 ${failures} 项未通过 ❌`);
   } finally {
     gw.kill('SIGTERM');

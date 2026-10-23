@@ -7,6 +7,29 @@
 
 const DAY_MS = 86400000;
 
+const WEEKDAYS_ZH = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+// 计划的人话写法（与前端 util.scheduleText 同口径），供通知等服务端场景使用
+export function scheduleText(s) {
+  if (!s) return '未设置计划';
+  switch (s.type) {
+    case 'weekly': {
+      const days = (s.weekdays && s.weekdays.length ? s.weekdays : [s.weekday ?? 1])
+        .map((d) => WEEKDAYS_ZH[d]).filter(Boolean).join('、');
+      return `每${days} ${s.time}`;
+    }
+    case 'monthly':
+      return `每月 ${s.dayOfMonth} 号 ${s.time}`;
+    case 'hours':
+      return `每 ${s.intervalHours} 小时`;
+    case 'days':
+      return `每 ${s.intervalDays} 天 ${s.time}`;
+    case 'cron':
+      return `cron：${s.cron}`;
+    default:
+      return `每天 ${s.time}`;
+  }
+}
+
 export function validHM(s, fallback = '03:30') {
   return /^\d{2}:\d{2}$/.test(s || '') && Number(s.slice(0, 2)) <= 23 && Number(s.slice(3, 5)) <= 59 ? s : fallback;
 }

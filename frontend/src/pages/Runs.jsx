@@ -39,6 +39,7 @@ export function RunRow({ run, onHandled, showTask = true, highlighted = false })
           {showTask && <span className="task-link">{run.taskName} · </span>}
           <RunStatusWord run={run} />
           {run.trigger === 'manual' && <span className="rr-manual">（手动执行）</span>}
+          {run.trigger === 'schedule' && <span className="rr-manual">（定时执行）</span>}
           <span className="rr-time">{fmtTimeSec(run.startedAt)}</span>
         </div>
         <div className={`rr-sum${run.status === 'failed' && !run.handledAt ? ' bad' : ''}`} title={runSummary(run)}>{runSummary(run)}</div>
