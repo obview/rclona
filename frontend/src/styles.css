@@ -307,14 +307,14 @@ input, select, textarea { font-family: inherit; font-size: 14px; color: var(--te
 .toast.err { background: #8c2f2f; }
 .note-box { background: var(--amber-bg); border: 1px solid #f0dcb2; color: #7a5a17; border-radius: 10px; padding: 11px 14px; font-size: 13px; }
 /* #27：任务表单「数据安全与高级选项」区 + 试运行/变更明细的清单 */
-.adv-box { margin-top: 18px; border: 1px solid var(--border, #e5e0d5); border-radius: 10px; padding: 12px 14px; }
-.adv-title { font-size: 13.5px; font-weight: 700; margin-bottom: 10px; }
-.adv-title .hint { font-size: 12px; color: var(--text-3); font-weight: 400; }
-.adv-row { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; padding: 6px 0; font-size: 13.5px; min-width: 0; }
-.adv-row + .adv-row { border-top: 1px dashed var(--border, #e5e0d5); }
-.adv-check { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; cursor: pointer; }
-.adv-label { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
-.adv-inline { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.opt-box { margin-top: 18px; border: 1px solid var(--border, #e5e0d5); border-radius: 10px; padding: 12px 14px; }
+.opt-title { font-size: 13.5px; font-weight: 700; margin-bottom: 10px; }
+.opt-title .hint { font-size: 12px; color: var(--text-3); font-weight: 400; }
+.opt-row { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; padding: 6px 0; font-size: 13.5px; min-width: 0; }
+.opt-row + .opt-row { border-top: 1px dashed var(--border, #e5e0d5); }
+.opt-check { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; cursor: pointer; }
+.opt-label { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.opt-inline { display: inline-flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .pv-list { max-height: 180px; overflow-y: auto; border: 1px solid var(--border, #e5e0d5); border-radius: 8px; padding: 6px 10px; margin-top: 4px; background: var(--bg-2, #faf8f3); }
 .pv-item { font-size: 12.5px; padding: 2px 0; word-break: break-all; color: var(--text-2); }
 .info-box { background: var(--indigo-50); border: 1px solid var(--indigo-100); color: #3c4176; border-radius: 10px; padding: 11px 14px; font-size: 13px; }

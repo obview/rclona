@@ -267,6 +267,21 @@ function TaskForm({ remotes, initial, onDone, toast }) {
         </div>
       )}
 
+      {/* #29：备份加密按用户要求放在基本区显眼处（文件夹映射下方、定时上方），不埋在高级区里 */}
+      <div className="opt-box" style={{ marginTop: 2, marginBottom: 16 }}>
+        <label className="opt-check">
+          <input type="checkbox" checked={cryptOn} onChange={(e) => setCryptOn(e.target.checked)} />
+          备份加密
+          <HelpTip text={'开启后，备份到目标的文件会被加密：文件名、文件夹名和文件内容都变成乱码，只有用加密密码才能读回来（往第三方网盘备隐私文件时很有用）。密码不在任务里填——去「设置」页统一填一把，所有开了加密的任务共用；还没设密码时开了这个开关，任务保存会被拦下。\n关掉加密后：新同步的文件是明文，但之前加密过的旧文件不会自动解密（关掉的那一刻起，面板按明文镜像去比对，加密过的旧文件会被当成「目标里多出来的乱码文件」按镜像规则处理——开着删除安全阀更稳妥）。想读回加密的旧文件，把密码填回设置、重新开启加密即可。'} />
+        </label>
+        {cryptOn && (
+          <div className="note-box" style={{ marginTop: 8 }}>
+            ⚠️ <b>加密密码忘了 = 加密过的备份全部无法恢复，谁也救不回来。</b>
+            密码在「设置」页统一填写（不在这个任务里）；请把它记在你保管重要密码的地方，不要只记在脑子里。
+          </div>
+        )}
+      </div>
+
       <div className="form-grid">
         <div className="field full">
           <label>任务名称 <span className="hint">（可选，不填自动生成）</span></label>
@@ -332,61 +347,48 @@ function TaskForm({ remotes, initial, onDone, toast }) {
           )}
         </div>
       </div>
-      <div className="adv-box">
-        <div className="adv-title">数据安全与高级选项 <span className="hint">（都可不设；老任务默认全关、不限）</span></div>
-        <div className="adv-row">
-          <label className="adv-check">
+      <div className="opt-box">
+        <div className="opt-title">数据安全与高级选项 <span className="hint">（都可不设；老任务默认全关、不限）</span></div>
+        <div className="opt-row">
+          <label className="opt-check">
             <input type="checkbox" checked={verOn} onChange={(e) => setVerOn(e.target.checked)} />
             旧版本保留
             <HelpTip text="开启后，被覆盖或被删除的文件不会直接消失：先移进目标文件夹里的 .rclona-archive/日期 归档区，保留若干天后自动清理。误删、源被清空时能从归档里捞回来。归档区不在镜像范围内、不会被同步删掉；代价是多占一点目标空间。" />
           </label>
           {verOn && (
-            <span className="adv-inline">保留
+            <span className="opt-inline">保留
               <input className="input" type="number" min="1" max="3650" style={{ width: 84 }} value={keepDays}
                 onChange={(e) => setKeepDays(e.target.value)} /> 天
             </span>
           )}
         </div>
-        <div className="adv-row">
-          <span className="adv-label">删除安全阀
+        <div className="opt-row">
+          <span className="opt-label">删除安全阀
             <HelpTip text="防误删的保险：如果一次备份要删掉的文件超过上限，就直接中止并给你发 Telegram 通知，一个文件都不会删。两个上限哪个先到都算触发；填 0 表示这一项不限。比如源被某个 App 清空、或路径配错时，它能拦住「把目标的好副本也删光」。" />
           </span>
-          <span className="adv-inline">最多删
+          <span className="opt-inline">最多删
             <input className="input" type="number" min="0" style={{ width: 96 }} value={mdCount}
               onChange={(e) => setMdCount(e.target.value)} /> 个文件，
           </span>
-          <span className="adv-inline">或超过目标现有文件的
+          <span className="opt-inline">或超过目标现有文件的
             <input className="input" type="number" min="0" max="100" style={{ width: 76 }} value={mdPercent}
               onChange={(e) => setMdPercent(e.target.value)} /> %
           </span>
         </div>
-        <div className="adv-row">
-          <span className="adv-label">同步限速
+        <div className="opt-row">
+          <span className="opt-label">同步限速
             <HelpTip text="限制这个任务同步时的最高速度，保护服务器带宽和弱网。写法：数字+单位，如 500k（约 500 KB/秒）、5M（约 5 MB/秒）；留空不限速。注意：面板全局共用一个限速开关，两个任务同时跑时以正在同步的那个为准。" />
           </span>
           <input className="input" style={{ width: 170 }} value={bwlimit} placeholder="留空不限，如 5M"
             onChange={(e) => setBwlimit(e.target.value)} />
         </div>
-        <div className="adv-row">
-          <label className="adv-check">
+        <div className="opt-row">
+          <label className="opt-check">
             <input type="checkbox" checked={trackRenames} onChange={(e) => setTrackRenames(e.target.checked)} />
             改名识别（不重传）
             <HelpTip text="开启后，源里改了名的文件会在目标里直接改名，不重新上传一份，适合经常改名的文件夹。代价：每次同步要多一轮指纹比对；目标网盘不支持时会自动退回重传，不影响备份结果。" />
           </label>
         </div>
-        <div className="adv-row">
-          <label className="adv-check">
-            <input type="checkbox" checked={cryptOn} onChange={(e) => setCryptOn(e.target.checked)} />
-            备份加密
-            <HelpTip text={'开启后，备份到目标的文件会被加密：文件名、文件夹名和文件内容都变成乱码，只有用加密密码才能读回来（往第三方网盘备隐私文件时很有用）。密码不在任务里填——去「设置」页统一填一把，所有开了加密的任务共用；还没设密码时开了这个开关，任务保存会被拦下。\n关掉加密后：新同步的文件是明文，但之前加密过的旧文件不会自动解密（关掉的那一刻起，面板按明文镜像去比对，加密过的旧文件会被当成「目标里多出来的乱码文件」按镜像规则处理——开着删除安全阀更稳妥）。想读回加密的旧文件，把密码填回设置、重新开启加密即可。'} />
-          </label>
-        </div>
-        {cryptOn && (
-          <div className="note-box" style={{ marginTop: 8 }}>
-            ⚠️ <b>加密密码忘了 = 加密过的备份全部无法恢复，谁也救不回来。</b>
-            密码在「设置」页统一填写（不在这个任务里）；请把它记在你保管重要密码的地方，不要只记在脑子里。
-          </div>
-        )}
       </div>
       <div className="note-box" style={{ marginTop: 16 }}>
         同步方式为<strong>纯镜像</strong>：目标网盘会与源保持完全一致 —— 源里新增/修改的文件会同步过去，
