@@ -209,11 +209,11 @@ export function FolderPicker({ remote, remoteType, value, onChange }) {
         <div className="info-box">
           <div>{err}</div>
           <div style={{ marginTop: 6 }}>
-            手动输入路径即可继续：填<b>桶名</b>（例如 webdav）或<b>桶名/子目录</b>（例如 webdav/photos），输完点右边按钮，这个路径就会被选上。
+            手动输入路径即可继续：填<b>桶名</b>（例如 my-bucket）或<b>桶名/子目录</b>（例如 my-bucket/photos），输完点右边按钮，这个路径就会被选上。
           </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
             <input className="input" style={{ flex: 1 }} value={manual} onChange={(e) => setManual(e.target.value)}
-              placeholder="例如：webdav 或 webdav/photos" />
+              placeholder="例如：my-bucket 或 my-bucket/photos" />
             <button className="btn btn-primary btn-sm" onClick={useManual}>就用这个路径</button>
           </div>
         </div>
