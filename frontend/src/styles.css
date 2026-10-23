@@ -492,8 +492,38 @@ input, select, textarea { font-family: inherit; font-size: 14px; color: var(--te
   .modal-mask { padding: 3vh 10px 20px; }
   .login-card { padding: 28px 22px 24px; }
   .kv-row .k { flex-basis: 88px; }
-  .help-bubble { max-width: 78vw; }
+  .help-bubble { max-width: 86vw; }
   .run-toasts { left: 14px; right: 14px; align-items: stretch; }
   .run-toast { max-width: none; }
   .log-box { font-size: 11px; }
+}
+
+/* ===== #31 网盘详情页 ===== */
+.detail-wrap { display: flex; flex-direction: column; gap: 16px; max-width: 860px; }
+.detail-card { padding: 20px 22px; }
+.detail-head { display: flex; align-items: center; gap: 14px; }
+.detail-head-main { flex: 1; min-width: 0; }
+.detail-name { font-size: 19px; font-weight: 700; display: flex; align-items: center; flex-wrap: wrap; }
+.detail-sub { color: var(--text-3); font-size: 13px; margin-top: 3px; }
+.detail-card-title { font-weight: 700; font-size: 15px; margin-bottom: 10px; }
+.detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 18px; }
+.detail-cell { background: var(--grey-bg); border-radius: 12px; padding: 14px 16px; }
+.detail-k { color: var(--text-3); font-size: 12.5px; margin-bottom: 5px; }
+.detail-v { font-size: 16.5px; font-weight: 700; }
+.detail-note { color: var(--text-3); font-size: 12.5px; margin-top: 5px; line-height: 1.55; }
+.cap-bar { height: 8px; border-radius: 99px; background: #e3e6f2; margin-top: 9px; overflow: hidden; }
+.cap-bar > span { display: block; height: 100%; background: var(--indigo-500); border-radius: 99px; }
+.rel-row { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; padding: 10px 6px; border: 0; border-top: 1px dashed var(--border); background: none; font: inherit; color: inherit; }
+button.rel-row { cursor: pointer; border-radius: 8px; }
+button.rel-row:hover { background: var(--grey-bg); }
+.rel-row:first-of-type { border-top: 0; }
+.rel-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.rel-task { font-weight: 600; font-size: 14px; }
+.rel-sub { color: var(--text-3); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rel-last { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; font-size: 13px; flex: 0 0 auto; }
+.rel-time { color: var(--text-3); font-size: 12px; }
+.detail-empty { color: var(--text-3); font-size: 13.5px; padding: 6px 0 10px; }
+@media (max-width: 760px) {
+  .detail-grid { grid-template-columns: 1fr; }
+  .detail-card { padding: 16px; }
 }

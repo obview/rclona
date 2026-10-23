@@ -83,6 +83,53 @@ async function remoteList() {  const names = await rc.listRemotes();
 
 const REMOTE_NAME_RE = /^[A-Za-z0-9_.\-]+$/;
 
+// #31：网盘详情聚合——全部用既有数据拼（rclone 配置 / store 里的健康、任务、运行记录），不新增存储。
+// 关系口径：任务的 srcRemote/dstRemote 是任务级字段，pairs 只存路径——本网盘是 srcRemote →
+// 「同步给」dstRemote；是 dstRemote → 「被同步自」srcRemote（多组映射逐组各算一条）。
+async function remoteDetail(name) {
+  const names = await rc.listRemotes();
+  if (!names.includes(name)) return null;
+  let type = '';
+  try { const c = await rc.getRemote(name); type = c.type || ''; } catch { /* 忽略 */ }
+  const rs = (store.data.remoteState || {})[name] || {};
+  const rel = [];
+  for (const t of store.data.tasks || []) {
+    for (const pr of pairsOf(t)) {
+      if (t.srcRemote === name) rel.push({ dir: 'src', task: t, otherRemote: t.dstRemote || '', otherPath: pr.dst || '' });
+      else if (t.dstRemote === name) rel.push({ dir: 'dst', task: t, otherRemote: t.srcRemote || '', otherPath: pr.src || '' });
+    }
+  }
+  const relIds = new Set(rel.map((x) => x.task.id));
+  const lastByTask = {};
+  for (const r of store.data.runs || []) {
+    if (relIds.has(r.taskId) && !lastByTask[r.taskId]) lastByTask[r.taskId] = r; // runs 新→旧序，第一条即最近
+  }
+  const brief = (x) => {
+    const lr = lastByTask[x.task.id];
+    return {
+      id: x.task.id, name: x.task.name, otherRemote: x.otherRemote, otherPath: x.otherPath,
+      schedule: x.task.schedule || null, enabled: x.task.enabled !== false, mode: x.task.mode || 'mirror',
+      lastStatus: lr?.status || null, lastRunAt: lr?.startedAt || null
+    };
+  };
+  const taskNameById = new Map((store.data.tasks || []).map((t) => [t.id, t.name]));
+  return {
+    name, type,
+    paused: store.isPaused(name),
+    needsCredentials: store.needsCredentials(name),
+    createdAt: rs.createdAt || null,
+    health: healthOf(name),
+    tasksAsSrc: rel.filter((x) => x.dir === 'src').map(brief),
+    tasksAsDst: rel.filter((x) => x.dir === 'dst').map(brief),
+    recentRuns: (store.data.runs || []).filter((r) => relIds.has(r.taskId)).slice(0, 10)
+      .map((r) => ({
+        id: r.id, taskId: r.taskId, taskName: taskNameById.get(r.taskId) || '（任务已删除）',
+        startedAt: r.startedAt, status: r.status,
+        stats: r.stats ? { files: r.stats.files ?? null, bytes: r.stats.bytes ?? null } : null
+      }))
+  };
+}
+
 // 列某个网盘某个目录的一层条目（目录与文件原样返回），文件夹选择器、文件浏览、下载共用。
 // #21 的本地根目录特判只发生在这里，不动全局 fsSpec（runner 与 S3 共用它的剥尾斜杠规则）：
 // local 网盘根目录若走 fsSpec("/") 会被剥成 "名字:"，rclone local 会把空路径解释为 rcd 进程
@@ -213,6 +260,10 @@ export function createServer() {
             params[k] = v;
           }
           await rc.createRemote(name, type, params);
+          // #31：记下创建时间，详情页要显示（老网盘没有这个字段，详情页显示「—」）
+          if (!store.data.remoteState) store.data.remoteState = {};
+          store.data.remoteState[name] = { ...(store.data.remoteState[name] || {}), createdAt: new Date().toISOString() };
+          store.save();
           const test = await testRemote(name).catch((e) => ({ ok: false, cause: e.message }));
           return sendJson(res, 200, { ok: true, name, test });
         }
@@ -269,6 +320,22 @@ export function createServer() {
             console.log(`[api] 网盘「${name}」已${action === 'pause' ? '暂停' : '恢复'}`);
             return sendJson(res, 200, { ok: true, paused: action === 'pause' });
           }
+        }
+        // #31：网盘详情聚合（只读拼装：基本信息 + 健康/容量 + 关系任务 + 最近运行）
+        const detailMatch = p.match(/^\/api\/remotes\/([^/]+)\/detail$/);
+        if (detailMatch && req.method === 'GET') {
+          const d = await remoteDetail(decodeURIComponent(detailMatch[1]));
+          if (!d) return sendJson(res, 404, { error: '网盘不存在' });
+          return sendJson(res, 200, d);
+        }
+        // #31「立即刷新」：当场实测一次连接状态 + 容量（走既有 testRemote / checkCapacity 通道，不加轮询），再回最新详情
+        if (detailMatch && req.method === 'POST') {
+          const name = decodeURIComponent(detailMatch[1]);
+          const names = await rc.listRemotes();
+          if (!names.includes(name)) return sendJson(res, 404, { error: '网盘不存在' });
+          await testRemote(name).catch(() => null);
+          await checkCapacity(name).catch(() => null);
+          return sendJson(res, 200, await remoteDetail(name));
         }
         if (p === '/api/browse' && req.method === 'GET') {
           const remote = url.searchParams.get('remote') || '';

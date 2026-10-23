@@ -1537,6 +1537,35 @@ async function main() {
     ok(victims.every((v) => fs.existsSync(path.join(bA, v))),
       '被拦下后另一边的文件一个都没被删（防误删传染）');
 
+    console.log('== 23. #31：网盘详情聚合接口 ==');
+    const detDir = path.join(T, 'detail-src'); fs.mkdirSync(detDir, { recursive: true });
+    fs.writeFileSync(path.join(detDir, 'd1.txt'), 'detail one');
+    const detRemote = await api('POST', '/api/remotes', { name: 'tdetail', type: 'local', config: {} });
+    ok(detRemote.status === 200, '详情用网盘创建成功', detRemote.data?.error || '');
+    const detTaskRes = await api('POST', '/api/tasks', {
+      name: '详情关系任务', srcRemote: 'tdetail', dstRemote: 'tdst',
+      pairs: [{ src: detDir, dst: path.join(T, 'detail-dst') }], schedule: { type: 'daily', time: '04:30' }
+    });
+    const detTaskId = detTaskRes.data?.task?.id;
+    ok(detTaskRes.status === 200 && !!detTaskId, '详情关系任务创建成功', detTaskRes.data?.error || '');
+    await api('POST', `/api/tasks/${detTaskId}/run`);
+    const detRun = await waitRun(detTaskId, '');
+    ok(detRun.status === 'success', '详情关系任务执行成功', detRun.reasonZh || '');
+    const dSrc = await api('GET', '/api/remotes/tdetail/detail');
+    ok(dSrc.status === 200 && dSrc.data.name === 'tdetail' && dSrc.data.type === 'local', '详情接口返回基本信息（名称/类型）');
+    ok(!!dSrc.data.createdAt, '新建网盘的详情带创建时间', String(dSrc.data.createdAt));
+    ok(Array.isArray(dSrc.data.tasksAsSrc) && dSrc.data.tasksAsSrc.some((t) => t.id === detTaskId && t.otherRemote === 'tdst' && t.lastStatus === 'success'),
+      '作为源的关系任务齐全（对方网盘+上次结果）', JSON.stringify(dSrc.data.tasksAsSrc || []));
+    ok((dSrc.data.recentRuns || []).some((r) => r.taskId === detTaskId && r.status === 'success'),
+      '最近运行记录含刚跑完的这次');
+    const dDst = await api('GET', '/api/remotes/tdst/detail');
+    ok((dDst.data.tasksAsDst || []).some((t) => t.id === detTaskId && t.otherRemote === 'tdetail'),
+      '目标网盘详情里能看到「被谁同步」', JSON.stringify((dDst.data.tasksAsDst || []).map((t) => t.name)));
+    const dRef = await api('POST', '/api/remotes/tdetail/detail');
+    ok(dRef.status === 200 && !!dRef.data.health?.lastCheckAt, '立即刷新（POST 详情）后带最新检查时间');
+    const d404 = await api('GET', '/api/remotes/no-such-remote/detail');
+    ok(d404.status === 404, '不存在的网盘详情返回 404');
+
     console.log(failures === 0 ? '\n全部自测通过 ✅' : `\n有 ${failures} 项未通过 ❌`);
   } finally {
     gw.kill('SIGTERM');
