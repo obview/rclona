@@ -1,9 +1,11 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { store, newId, pairsOf } from './store.js';
 import { rc, fsSpec } from './rc.js';
 import { stageReason, classifyError } from './classify.js';
 import { notifyBackupFailure, notifyFirstScheduledSuccess } from './notifier.js';
 import { pairFilterRules, escapeFilterLiteral } from './filters.js';
-import { taskOptionsOf } from './taskopts.js';
+import { taskOptionsOf, syncModeOf } from './taskopts.js';
 import { ensureCryptRemote, dropCryptRemote } from './crypt.js';
 import { cfg } from './config.js';
 
@@ -85,6 +87,30 @@ function dateStrInTz(daysAgo = 0) {
   return new Date(Date.now() - daysAgo * 86400000).toLocaleDateString('en-CA', { timeZone: cfg.tz });
 }
 
+// #30 双向同步（bisync）的状态管理：bisync 要靠「上次两边的清单」算增量，
+// 清单（workdir）必须持久存放、按任务+组号隔离，放在数据目录下 bisync/<任务id>/<组号>/。
+// 我们自己的一个小标记文件 rclona-state.json 记「这组是否已完成首次对齐（resync）」：
+// 没对齐过 → 本次带 resync 跑（首次以源 path1 为准）；跑成功 → initialized=true。
+// bisync 中途被打断导致其内部状态失效时，它下次会直接报错 aborted——我们据此把标记
+// 清回未对齐并置 recovery=true，让再下一次执行自动重新对齐，且恢复对齐改用「较新者为准」
+// （resyncMode=newer），避免拿源的旧文件覆盖目标的新文件（见 runPair 的 bisync 失败处理）。
+export function bisyncWorkdir(taskId, pairIdx) {
+  const safe = String(taskId).replace(/[^A-Za-z0-9_-]/g, '');
+  return path.join(cfg.dataDir, 'bisync', safe, String(pairIdx));
+}
+function readBisyncState(workdir) {
+  try {
+    const s = JSON.parse(fs.readFileSync(path.join(workdir, 'rclona-state.json'), 'utf8'));
+    return { initialized: !!s?.initialized, recovery: !!s?.recovery };
+  } catch { return { initialized: false, recovery: false }; }
+}
+function writeBisyncState(workdir, state) {
+  try {
+    fs.mkdirSync(workdir, { recursive: true });
+    fs.writeFileSync(path.join(workdir, 'rclona-state.json'), JSON.stringify(state));
+  } catch { /* 标记写不下不阻断本次结果，下次大不了重新对齐 */ }
+}
+
 // 变更明细（#27）：operations/check 的三份名单就是「将新增/将更新/将删除」，
 // 与真实运行、试运行预览共用同一来源，口径一致。每类封顶 cap 条，超出置 truncated。
 export const CHANGES_CAP = 500;
@@ -151,6 +177,7 @@ async function cleanupArchiveFs(archiveFs, keepDays) {
 // stages/stats 是本组私有的记录格，onProgress 回调把聚合结果刷进运行记录（供界面实时看）。
 async function runPair({ task, pair, pairIdx = 0, log, stages, stats, onProgress }) {
   const opts = taskOptionsOf(task);
+  const mode = syncModeOf(task); // #30：mirror / copy / bisync，下面的阶段按模式分岔
   const srcFs = fsSpec(task.srcRemote, pair.src);
   const dstFs = fsSpec(task.dstRemote, pair.dst);
   // #27 B 段：开了备份加密时，阶段 3 起目标改走临时 crypt 通道（effDstFs），
@@ -219,12 +246,15 @@ async function runPair({ task, pair, pairIdx = 0, log, stages, stats, onProgress
         log('目标目录不存在，已自动创建');
       } catch (mkErr) { return failAt(2, mkErr.message); }
     }
-    try {
-      const ab = await rc.about(effDstFs);
-      if (ab && typeof ab.free === 'number' && ab.free >= 0 && ab.free < scan.bytes) {
-        return failAt(2, 'insufficient space: 目标可用空间小于源文件总大小');
-      }
-    } catch { /* about 不支持就跳过容量预检 */ }
+    // 双向同步时文件是两边互通的，源总量不等于目标要接收的量，这个预检不适用，跳过
+    if (mode !== 'bisync') {
+      try {
+        const ab = await rc.about(effDstFs);
+        if (ab && typeof ab.free === 'number' && ab.free >= 0 && ab.free < scan.bytes) {
+          return failAt(2, 'insufficient space: 目标可用空间小于源文件总大小');
+        }
+      } catch { /* about 不支持就跳过容量预检 */ }
+    }
     setStage(2, 'ok', Date.now() - t0);
     log('目标网盘连接正常');
 
@@ -232,13 +262,23 @@ async function runPair({ task, pair, pairIdx = 0, log, stages, stats, onProgress
     // ① 得出变更明细记进运行记录；② 删除安全阀按将删数量把关，超限在真同步开始前就拦下，
     // 一个文件都不会删（不用 rclone 的 --max-delete：实测它是删到上限才报错的事后闸）。
     // 比对本身失败不阻断备份（记日志、明细留空、安全阀跳过把关）。
-    try {
-      const pre = await rc.check(srcFs, effDstFs, filterRules);
-      pairChanges = changesFromCheck(pre);
-    } catch (e) {
-      log(`同步前比对未完成（${e.message}），直接同步；本次变更明细可能不完整`);
+    // #30 按模式分岔：双向同步没有「单向将变更」的概念（两边互相合并），跳过比对与安全阀，
+    // 明细留空；单向增加永不删除——比对里的「将删除」（目标比源多出的文件）对它不成立，
+    // 明细里抹掉、安全阀也不适用（它拦的是镜像的删除传染）。
+    if (mode === 'bisync') {
+      log('同步方式为双向同步：变化会在两边互相合并，本次不生成单向变更明细、删除安全阀不适用');
+    } else {
+      try {
+        const pre = await rc.check(srcFs, effDstFs, filterRules);
+        pairChanges = changesFromCheck(pre);
+        if (mode === 'copy' && pairChanges) {
+          pairChanges = { ...pairChanges, deleted: [], counts: { ...pairChanges.counts, deleted: 0 } };
+        }
+      } catch (e) {
+        log(`同步前比对未完成（${e.message}），直接同步；本次变更明细可能不完整`);
+      }
     }
-    if (pairChanges && (opts.maxDelete.count > 0 || opts.maxDelete.percent > 0)) {
+    if (mode === 'mirror' && pairChanges && (opts.maxDelete.count > 0 || opts.maxDelete.percent > 0)) {
       const limits = [];
       if (opts.maxDelete.count > 0) limits.push(opts.maxDelete.count);
       if (opts.maxDelete.percent > 0) {
@@ -259,16 +299,42 @@ async function runPair({ task, pair, pairIdx = 0, log, stages, stats, onProgress
       }
     }
 
-    // 阶段 4：真正传输（rc sync 异步任务，轮询状态）
+    // 阶段 4：真正传输（rc 异步任务，轮询状态）——#30 按同步方式分发：
+    // mirror → sync/sync（现状）；copy → sync/copy（只添/更新不删，归档口径与镜像相同、
+    // 改名识别是 sync 专属，copy 不带）；bisync → sync/bisync（状态目录与首次对齐见上方助手）。
     t0 = Date.now();
     setStage(3, 'running');
     // #27 单次调用级配置：BackupDir（被覆盖/删除的文件先进归档区）、TrackRenames（改名不重传）
-    const syncCfg = {};
     const archiveDate = dateStrInTz(0);
-    if (opts.versioning.enabled) syncCfg.BackupDir = `${effDstFs}/${ARCHIVE_DIR}/${archiveDate}`;
-    if (opts.trackRenames) syncCfg.TrackRenames = true;
+    let bisyncCtx = null; // 双向同步时记 { wd, wasInitialized }，供成功/失败后维护对齐标记
     let jobid;
-    try { jobid = await rc.syncAsync(srcFs, effDstFs, filterRules, syncCfg); }
+    try {
+      if (mode === 'bisync') {
+        const wd = bisyncWorkdir(task.id, pairIdx);
+        fs.mkdirSync(wd, { recursive: true });
+        const bst = readBisyncState(wd);
+        bisyncCtx = { wd, wasInitialized: bst.initialized };
+        jobid = await rc.bisyncAsync(srcFs, effDstFs, filterRules, {
+          workdir: wd,
+          resync: !bst.initialized,
+          resyncMode: bst.recovery ? 'newer' : 'path1'
+        });
+        if (!bst.initialized) {
+          log(bst.recovery
+            ? '双向同步重新对齐：先以较新的文件为准把两边对齐一次，之后恢复双向互相同步'
+            : '双向同步第一次执行：先以源网盘为准把两边对齐一次，之后才开始双向互相同步');
+        }
+      } else if (mode === 'copy') {
+        const copyCfg = {};
+        if (opts.versioning.enabled) copyCfg.BackupDir = `${effDstFs}/${ARCHIVE_DIR}/${archiveDate}`;
+        jobid = await rc.copyAsync(srcFs, effDstFs, filterRules, copyCfg);
+      } else {
+        const syncCfg = {};
+        if (opts.versioning.enabled) syncCfg.BackupDir = `${effDstFs}/${ARCHIVE_DIR}/${archiveDate}`;
+        if (opts.trackRenames) syncCfg.TrackRenames = true;
+        jobid = await rc.syncAsync(srcFs, effDstFs, filterRules, syncCfg);
+      }
+    }
     catch (e) { return failAt(3, e.message); }
     // #27 限速：_config 的 BwLimit 在 rcd 下实测不生效，只能拨全局开关——
     // 记住原值，同步一结束（成功/失败/超时都算）立刻恢复，避免影响别的任务与自检。
@@ -306,23 +372,46 @@ async function runPair({ task, pair, pairIdx = 0, log, stages, stats, onProgress
       try { await rc.bwlimitSet(bwRestore); } catch { /* 恢复失败不影响备份结果 */ }
       bwRestore = null;
     }
-    if (timedOut) { await pullJobStats(); return failAt(3, '同步超时（超过设定时长仍未完成）'); }
-    if (!job.success) { await pullJobStats(); return failAt(3, job.error || '同步任务失败'); }
+    if (timedOut) {
+      // 双向同步被我们单方面判超时：bisync 内部状态可能已与清单脱节，标记为待恢复对齐
+      if (bisyncCtx) writeBisyncState(bisyncCtx.wd, { initialized: false, recovery: true });
+      await pullJobStats();
+      return failAt(3, '同步超时（超过设定时长仍未完成）');
+    }
+    if (!job.success) {
+      await pullJobStats();
+      // 双向同步失败（安全中止/状态失效等）：清掉对齐标记，下次执行自动重新对齐
+      // （恢复对齐以较新者为准）；失败原因由 classify 的 bisync 规则给人话。
+      if (bisyncCtx) writeBisyncState(bisyncCtx.wd, { initialized: false, recovery: true });
+      return failAt(3, job.error || '同步任务失败');
+    }
+    if (bisyncCtx) writeBisyncState(bisyncCtx.wd, { initialized: true, recovery: false });
     await pullJobStats();
     setStage(3, 'ok', Date.now() - t0);
     log(`传输完成：同步了 ${stats.transferred ?? 0} 个文件`);
+    if (mode === 'copy') log('同步方式为单向增加：源里删除的文件不会从目标删掉，目标里多出的文件也会保留');
     if (stats.renames) log(`其中 ${stats.renames} 个文件只是改了名字（已在目标直接改名，没有重传）`);
-    if (opts.versioning.enabled && pairChanges) {
+    if (mode !== 'bisync' && opts.versioning.enabled && pairChanges) {
       const archived = pairChanges.counts.updated + pairChanges.counts.deleted;
       if (archived > 0) log(`被覆盖/删除的 ${archived} 个文件已先移入归档区（${pair.dst ? `${pair.dst}/` : ''}${ARCHIVE_DIR}/${archiveDate}），保留 ${opts.versioning.keepDays} 天后自动清理`);
     }
 
     // 阶段 5：校验（rclone check 复核两边一致性）
+    // #30：双向同步由 bisync 在收尾时自行核对两边最终清单（checkSync 默认开），
+    // 单向 check 的口径（谁多谁少）对双向不成立，这里直接采信其结果；
+    // 单向增加则只核对「源的文件是否都到了、内容对不对」——目标多出的文件是预期保留，不算不一致。
     t0 = Date.now();
     setStage(4, 'running');
+    if (mode === 'bisync') {
+      setStage(4, 'ok', Date.now() - t0);
+      log('校验通过：双向同步已由 rclone 自行核对，两边清单一致');
+      return { ok: true, changes: pairChanges };
+    }
     try {
       const chk = await rc.check(srcFs, effDstFs, filterRules);
-      const diffs = [...(chk.differ || []), ...(chk.missingOnSrc || []), ...(chk.missingOnDst || [])];
+      const diffs = mode === 'copy'
+        ? [...(chk.differ || []), ...(chk.missingOnDst || [])]
+        : [...(chk.differ || []), ...(chk.missingOnSrc || []), ...(chk.missingOnDst || [])];
       const errs = chk.error || [];
       if (errs.length) return failAt(4, errs[0]);
       if (diffs.length) {
@@ -476,7 +565,8 @@ export async function runTask(task, trigger = 'manual') {
   // #27：开了旧版本保留的任务，每次运行后顺带清理过期归档（失败只记日志，不影响备份结果）。
   // 开了备份加密的任务，归档区在加密视图里，清理时要临时再架一次 crypt 通道去访问。
   const taskOpts = taskOptionsOf(task);
-  if (taskOpts.versioning.enabled) {
+  // #30：双向同步不用归档区（它的备份目录语义与单向不同），开了旧版本保留也不处理
+  if (taskOpts.versioning.enabled && syncModeOf(task) !== 'bisync') {
     for (let i = 0; i < pairs.length; i++) {
       const pair = pairs[i];
       let tmpCrypt = null;
@@ -546,6 +636,7 @@ export async function previewTask(task) {
   const pairs = pairsOf(task);
   const out = [];
   const taskOpts = taskOptionsOf(task);
+  const mode = syncModeOf(task); // #30：预览也按同步方式分口径
   for (let i = 0; i < pairs.length; i++) {
     const pair = pairs[i];
     const srcFs = fsSpec(task.srcRemote, pair.src);
@@ -566,12 +657,47 @@ export async function previewTask(task) {
       }
       const sink = [];
       const { filterRules } = await computePairFilters({ task, pair, srcFs, log: (m) => sink.push(m) });
+      if (mode === 'bisync') {
+        // #30 双向同步的试运行：没有单向清单可列（变化是两边合并的），改跑一次 bisync 的
+        // dry-run 拿「大约要互传多少个文件」的总数，以说明文字呈现（item.note）。
+        // 还没完成首次对齐的组没法 dry-run（bisync 会直接拒绝），如实告知先真跑一次。
+        const wd = bisyncWorkdir(task.id, i);
+        if (!readBisyncState(wd).initialized) {
+          item.error = '这个任务还没跑过第一次双向同步：请先点「立即执行」完成首次对齐，之后才能试运行';
+        } else {
+          const jobid = await rc.bisyncAsync(srcFs, effDstFs, filterRules, { workdir: wd, dryRun: true });
+          const deadline = Date.now() + 10 * 60 * 1000;
+          let job = null;
+          for (;;) {
+            await new Promise((r) => setTimeout(r, 1000));
+            job = await rc.jobStatus(jobid).catch(() => null);
+            if (job?.finished) break;
+            if (Date.now() > deadline) break;
+          }
+          if (job?.finished && job.success) {
+            const st = await rc.stats(`job/${jobid}`);
+            const n = st.transfers ?? 0;
+            item.note = n > 0
+              ? `双向同步试运行：两边大约有 ${n} 个文件需要互相传递（新增、更新、删除合并计算，以实际执行为准）。双向同步没有单向的清单——谁更新就同步给谁。`
+              : '双向同步试运行：两边已经一致，真跑也不会动任何文件。';
+            item.dryRun = { transfers: n, deletes: st.deletes ?? 0 };
+          } else {
+            item.error = `双向同步试运行没跑成：${job?.error || '未知原因'}（正式执行时会给出更具体的原因）`;
+          }
+        }
+        out.push(item);
+        continue;
+      }
       const chk = await rc.check(srcFs, effDstFs, filterRules);
       const ch = changesFromCheck(chk, PREVIEW_CAP);
       item.added = ch.added; item.updated = ch.updated; item.deleted = ch.deleted;
       item.counts = ch.counts; item.truncated = ch.truncated;
+      // #30 单向增加：没有「将删除」——目标多出的文件会被保留，清单里不列、计数归零
+      if (mode === 'copy') { item.deleted = []; item.counts = { ...item.counts, deleted: 0 }; }
       try {
-        const jobid = await rc.syncAsync(srcFs, effDstFs, filterRules, { DryRun: true });
+        const jobid = mode === 'copy'
+          ? await rc.copyAsync(srcFs, effDstFs, filterRules, { DryRun: true })
+          : await rc.syncAsync(srcFs, effDstFs, filterRules, { DryRun: true });
         const deadline = Date.now() + 10 * 60 * 1000;
         let job = null;
         for (;;) {

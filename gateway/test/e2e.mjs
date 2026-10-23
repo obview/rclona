@@ -1441,6 +1441,102 @@ async function main() {
     const impBad3 = await api('POST', '/api/settings/import', { data: '就是一个字符串' });
     ok(impBad3.status === 400, '结构不对的导入内容被拒');
 
+    console.log('== 22. #30：同步模式（单向增加 / 双向同步 / 非法模式被拒）==');
+    // 22a 非法同步方式在保存时被中文拦下
+    const badMode = await api('POST', '/api/tasks', {
+      name: '坏模式', srcRemote: 'tsrc', dstRemote: 'tdst',
+      pairs: [{ src: srcDir, dst: dstDir }], schedule: { type: 'daily', time: '04:00' }, mode: 'sideways'
+    });
+    // 注：validateTask 的校验错误在本网关统一走 500 + 中文 error 文本（既有口径，如 cron 写错也是），前端照样能显示
+    ok(badMode.status >= 400 && /同步方式/.test(badMode.data?.error || ''),
+      '非法同步方式被拒并给出中文原因', badMode.data?.error || `status=${badMode.status}`);
+
+    // 22b 单向增加（copy）：源删文件目标不删、源新增能过去、变更明细里没有「删除」
+    const cpSrc = path.join(T, 'mode22', 'cp-src'); const cpDst = path.join(T, 'mode22', 'cp-dst');
+    fs.mkdirSync(cpSrc, { recursive: true }); fs.mkdirSync(cpDst, { recursive: true });
+    fs.writeFileSync(path.join(cpSrc, 'f1.txt'), 'copy one');
+    fs.writeFileSync(path.join(cpSrc, 'keep.txt'), 'keep me');
+    const cpTaskRes = await api('POST', '/api/tasks', {
+      name: '单向增加任务', srcRemote: 'tsrc', dstRemote: 'tdst',
+      pairs: [{ src: cpSrc, dst: cpDst }], schedule: { type: 'daily', time: '04:00' }, mode: 'copy'
+    });
+    ok(cpTaskRes.status === 200 && cpTaskRes.data.task.mode === 'copy', '单向增加任务创建成功且模式已保存');
+    const cpTaskId = cpTaskRes.data.task.id;
+    const waitRun = async (taskId, afterId) => waitFor(async () => {
+      const d = await api('GET', `/api/runs?taskId=${taskId}`);
+      const r = (d.data.runs || []).find((x) => x.id !== afterId);
+      return r && r.status !== 'running' ? r : null;
+    }, 90000);
+    await api('POST', `/api/tasks/${cpTaskId}/run`);
+    const cpRun1 = await waitRun(cpTaskId, '');
+    ok(cpRun1.status === 'success', '单向增加首次执行成功', cpRun1.reasonZh || '');
+    ok(fs.readFileSync(path.join(cpDst, 'keep.txt'), 'utf8') === 'keep me', '文件已复制到目标');
+    fs.rmSync(path.join(cpSrc, 'keep.txt'));
+    fs.writeFileSync(path.join(cpSrc, 'added.txt'), 'added later');
+    await api('POST', `/api/tasks/${cpTaskId}/run`);
+    const cpRun2 = await waitRun(cpTaskId, cpRun1.id);
+    ok(cpRun2.status === 'success', '单向增加第二次执行成功', cpRun2.reasonZh || '');
+    ok(fs.existsSync(path.join(cpDst, 'keep.txt')), '源已删除的文件在目标仍然保留（不删）');
+    ok(fs.readFileSync(path.join(cpDst, 'added.txt'), 'utf8') === 'added later', '源新增的文件已传到目标');
+    ok(cpRun2.changes && cpRun2.changes.counts.deleted === 0 && (cpRun2.changes.deleted || []).length === 0,
+      '单向增加的变更明细里没有删除项', JSON.stringify(cpRun2.changes?.counts || {}));
+
+    // 22c 双向同步（bisync）：首次对齐 → 两侧各改互相同步 → 同文件双改冲突留副本
+    const bA = path.join(T, 'mode22', 'bi-a'); const bB = path.join(T, 'mode22', 'bi-b');
+    fs.mkdirSync(bA, { recursive: true }); fs.mkdirSync(bB, { recursive: true });
+    fs.writeFileSync(path.join(bA, 'a.txt'), 'from A');
+    fs.writeFileSync(path.join(bB, 'b.txt'), 'from B');
+    const biTaskRes = await api('POST', '/api/tasks', {
+      name: '双向同步任务', srcRemote: 'tsrc', dstRemote: 'tdst',
+      pairs: [{ src: bA, dst: bB }], schedule: { type: 'daily', time: '04:00' }, mode: 'bisync'
+    });
+    ok(biTaskRes.status === 200 && biTaskRes.data.task.mode === 'bisync', '双向同步任务创建成功且模式已保存');
+    const biTaskId = biTaskRes.data.task.id;
+    // 还没真跑过的双向任务，试运行要如实说「先真跑一次」
+    const biPrev0 = await api('POST', `/api/tasks/${biTaskId}/preview`);
+    ok(/先点「立即执行」|首次对齐/.test(biPrev0.data?.preview?.pairs?.[0]?.error || ''),
+      '未对齐的双向任务试运行给出提示（先真跑一次）', biPrev0.data?.preview?.pairs?.[0]?.error || '');
+    await api('POST', `/api/tasks/${biTaskId}/run`);
+    const biRun1 = await waitRun(biTaskId, '');
+    ok(biRun1.status === 'success', '双向同步首次执行（自动 resync 对齐）成功', biRun1.reasonZh || '');
+    ok(fs.existsSync(path.join(bB, 'a.txt')) && fs.existsSync(path.join(bA, 'b.txt')),
+      '首次对齐后两边文件齐了（A 的到了 B、B 的到了 A）');
+    ok(!biRun1.changes, '双向同步不生成单向变更明细');
+    fs.writeFileSync(path.join(bA, 'a2.txt'), 'A second');
+    fs.writeFileSync(path.join(bB, 'b2.txt'), 'B second');
+    fs.writeFileSync(path.join(bA, 'shared.txt'), 'shared v1');
+    await api('POST', `/api/tasks/${biTaskId}/run`);
+    const biRun2 = await waitRun(biTaskId, biRun1.id);
+    ok(biRun2.status === 'success', '双向同步第二次执行成功', biRun2.reasonZh || '');
+    ok(fs.existsSync(path.join(bB, 'a2.txt')) && fs.existsSync(path.join(bA, 'b2.txt'))
+      && fs.readFileSync(path.join(bB, 'shared.txt'), 'utf8') === 'shared v1',
+      '两侧各自的新文件都同步到了对方');
+    const nowSec = Math.floor(Date.now() / 1000);
+    const setM = (p, sec) => { const d = new Date(sec * 1000); fs.utimesSync(p, d, d); };
+    fs.writeFileSync(path.join(bA, 'shared.txt'), 'A newer content');
+    setM(path.join(bA, 'shared.txt'), nowSec);
+    fs.writeFileSync(path.join(bB, 'shared.txt'), 'B older content');
+    setM(path.join(bB, 'shared.txt'), nowSec - 3600);
+    await api('POST', `/api/tasks/${biTaskId}/run`);
+    const biRun3 = await waitRun(biTaskId, biRun2.id);
+    ok(biRun3.status === 'success', '双向同步冲突轮执行成功', biRun3.reasonZh || '');
+    ok(fs.readFileSync(path.join(bA, 'shared.txt'), 'utf8') === 'A newer content'
+      && fs.readFileSync(path.join(bB, 'shared.txt'), 'utf8') === 'A newer content',
+      '同文件双改：较新的版本胜出、两边一致');
+    const conflictCopies = fs.readdirSync(bA).filter((n) => n.startsWith('shared.txt.conflict'));
+    ok(conflictCopies.length >= 1 && fs.readFileSync(path.join(bA, conflictCopies[0]), 'utf8') === 'B older content',
+      '较旧的版本被改名保留成冲突副本（没直接丢弃）', conflictCopies.join(','));
+
+    // 22d 双向同步的删除安全：一次删太多（>一半）应被拦下且不传染
+    const victims = ['a.txt', 'b.txt', 'a2.txt', 'b2.txt'];
+    for (const v of victims) fs.rmSync(path.join(bB, v));
+    await api('POST', `/api/tasks/${biTaskId}/run`);
+    const biRun4 = await waitRun(biTaskId, biRun3.id);
+    ok(biRun4.status === 'failed' && /删除的文件太多/.test(biRun4.reasonZh || ''),
+      '双向同步一次删太多被安全机制拦下并给出人话原因', biRun4.reasonZh || '');
+    ok(victims.every((v) => fs.existsSync(path.join(bA, v))),
+      '被拦下后另一边的文件一个都没被删（防误删传染）');
+
     console.log(failures === 0 ? '\n全部自测通过 ✅' : `\n有 ${failures} 项未通过 ❌`);
   } finally {
     gw.kill('SIGTERM');

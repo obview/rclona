@@ -80,6 +80,8 @@ function TaskForm({ remotes, initial, onDone, toast }) {
   const [bwlimit, setBwlimit] = useState(initial?.bwlimit || '');
   const [trackRenames, setTrackRenames] = useState(!!initial?.trackRenames);
   const [cryptOn, setCryptOn] = useState(!!initial?.crypt?.enabled);
+  // #30：同步方式（mirror 镜像 / copy 单向增加 / bisync 双向）；老任务无此字段 = 镜像
+  const [mode, setMode] = useState(initial?.mode || 'mirror');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
@@ -144,6 +146,7 @@ function TaskForm({ remotes, initial, onDone, toast }) {
       srcRemote, dstRemote,
       pairs: pairs.map(({ src, dst, filters }) => ({ src, dst, filters: cleanPairFilters(filters) })),
       schedule,
+      mode,
       versioning: { enabled: verOn, keepDays: Number(keepDays) || 30 },
       maxDelete: { count: Math.trunc(Number(mdCount) || 0), percent: Math.trunc(Number(mdPercent) || 0) },
       bwlimit: bwlimit.trim(),
@@ -267,6 +270,39 @@ function TaskForm({ remotes, initial, onDone, toast }) {
         </div>
       )}
 
+      {/* #30：同步方式（基本区，建任务时就要定；三种各自一句大白话 + 风险提示） */}
+      <div className="opt-box" style={{ marginTop: 2, marginBottom: 16 }}>
+        <div className="opt-title">同步方式</div>
+        <label className="opt-row" style={{ cursor: 'pointer', alignItems: 'flex-start' }}>
+          <input type="radio" name="sync-mode" checked={mode === 'mirror'} onChange={() => setMode('mirror')} style={{ marginTop: 3 }} />
+          <span>
+            <b>镜像同步</b>（默认）
+            <div style={{ color: 'var(--text-2)', fontWeight: 400, fontSize: 13 }}>目标和源一模一样：源里删了文件，目标里也会删。适合「目标就是源的完整副本」。</div>
+          </span>
+        </label>
+        <label className="opt-row" style={{ cursor: 'pointer', alignItems: 'flex-start' }}>
+          <input type="radio" name="sync-mode" checked={mode === 'copy'} onChange={() => setMode('copy')} style={{ marginTop: 3 }} />
+          <span>
+            <b>单向增加</b>
+            <div style={{ color: 'var(--text-2)', fontWeight: 400, fontSize: 13 }}>只往目标添新文件、更新改过的文件；源里删了的，目标<b>不删</b>；目标里多出来的文件也保留。适合「只攒不删」的囤积型备份。</div>
+          </span>
+        </label>
+        <label className="opt-row" style={{ cursor: 'pointer', alignItems: 'flex-start' }}>
+          <input type="radio" name="sync-mode" checked={mode === 'bisync'} onChange={() => setMode('bisync')} style={{ marginTop: 3 }} />
+          <span>
+            <b>双向同步</b>
+            <div style={{ color: 'var(--text-2)', fontWeight: 400, fontSize: 13 }}>两边谁改了就同步给对方，让两个网盘保持一致（像网盘客户端那样）。第一次执行会先以源网盘为准对齐一次。</div>
+          </span>
+        </label>
+        {mode === 'bisync' && (
+          <div className="note-box" style={{ marginTop: 8 }}>
+            ⚠️ <b>双向同步有风险，先想清楚再用：</b>同一文件如果两边都改过，较新的胜出、较旧的会改名留一份副本（不会直接丢）；
+            但如果<b>任一边被清空、程序读错或路径指错，删除也会同步到另一边</b>，可能两边一起丢文件。
+            重要数据请另外再配一个镜像/单向增加任务留底。删除安全阀、旧版本保留、改名识别对双向同步不适用（已自动跳过）。
+          </div>
+        )}
+      </div>
+
       {/* #29：备份加密按用户要求放在基本区显眼处（文件夹映射下方、定时上方），不埋在高级区里 */}
       <div className="opt-box" style={{ marginTop: 2, marginBottom: 16 }}>
         <label className="opt-check">
@@ -349,6 +385,7 @@ function TaskForm({ remotes, initial, onDone, toast }) {
       </div>
       <div className="opt-box">
         <div className="opt-title">数据安全与高级选项 <span className="hint">（都可不设；老任务默认全关、不限）</span></div>
+        {mode !== 'bisync' && (
         <div className="opt-row">
           <label className="opt-check">
             <input type="checkbox" checked={verOn} onChange={(e) => setVerOn(e.target.checked)} />
@@ -362,6 +399,8 @@ function TaskForm({ remotes, initial, onDone, toast }) {
             </span>
           )}
         </div>
+        )}
+        {mode === 'mirror' && (
         <div className="opt-row">
           <span className="opt-label">删除安全阀
             <HelpTip text="防误删的保险：如果一次备份要删掉的文件超过上限，就直接中止并给你发 Telegram 通知，一个文件都不会删。两个上限哪个先到都算触发；填 0 表示这一项不限。比如源被某个 App 清空、或路径配错时，它能拦住「把目标的好副本也删光」。" />
@@ -375,6 +414,7 @@ function TaskForm({ remotes, initial, onDone, toast }) {
               onChange={(e) => setMdPercent(e.target.value)} /> %
           </span>
         </div>
+        )}
         <div className="opt-row">
           <span className="opt-label">同步限速
             <HelpTip text="限制这个任务同步时的最高速度，保护服务器带宽和弱网。写法：数字+单位，如 500k（约 500 KB/秒）、5M（约 5 MB/秒）；留空不限速。注意：面板全局共用一个限速开关，两个任务同时跑时以正在同步的那个为准。" />
@@ -382,6 +422,7 @@ function TaskForm({ remotes, initial, onDone, toast }) {
           <input className="input" style={{ width: 170 }} value={bwlimit} placeholder="留空不限，如 5M"
             onChange={(e) => setBwlimit(e.target.value)} />
         </div>
+        {mode === 'mirror' && (
         <div className="opt-row">
           <label className="opt-check">
             <input type="checkbox" checked={trackRenames} onChange={(e) => setTrackRenames(e.target.checked)} />
@@ -389,10 +430,31 @@ function TaskForm({ remotes, initial, onDone, toast }) {
             <HelpTip text="开启后，源里改了名的文件会在目标里直接改名，不重新上传一份，适合经常改名的文件夹。代价：每次同步要多一轮指纹比对；目标网盘不支持时会自动退回重传，不影响备份结果。" />
           </label>
         </div>
+        )}
+        {mode === 'copy' && (
+          <div style={{ color: 'var(--text-3)', fontSize: 12.5, paddingTop: 6 }}>
+            单向增加永不删除文件，所以「删除安全阀」和「改名识别」对它不适用，没有显示。
+          </div>
+        )}
+        {mode === 'bisync' && (
+          <div style={{ color: 'var(--text-3)', fontSize: 12.5, paddingTop: 6 }}>
+            双向同步只适用「同步限速」：删除安全阀、旧版本保留、改名识别的口径都是单向的，对双向不适用，没有显示（双向自带一道删除过多自动拦下的保护）。
+          </div>
+        )}
       </div>
       <div className="note-box" style={{ marginTop: 16 }}>
-        同步方式为<strong>纯镜像</strong>：目标网盘会与源保持完全一致 —— 源里新增/修改的文件会同步过去，
-        <strong>源里删除的文件，目标里也会被删除</strong>。比对使用校验和，改过的文件不会漏传。
+        {mode === 'mirror' && (
+          <>同步方式为<strong>纯镜像</strong>：目标网盘会与源保持完全一致 —— 源里新增/修改的文件会同步过去，
+          <strong>源里删除的文件，目标里也会被删除</strong>。比对使用校验和，改过的文件不会漏传。</>
+        )}
+        {mode === 'copy' && (
+          <>同步方式为<strong>单向增加</strong>：源里新增/修改的文件会传到目标；<strong>源里删除的文件，目标里不会被删除</strong>，
+          目标里多出来的文件也会保留。比对使用校验和，改过的文件不会漏传。</>
+        )}
+        {mode === 'bisync' && (
+          <>同步方式为<strong>双向同步</strong>：两个网盘互相同步，谁更新就同步给谁；同一文件两边都改过时，
+          <strong>较新的胜出，较旧的会改名留一份副本</strong>。第一次执行会先以源网盘为准对齐一次。</>
+        )}
       </div>
       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 18 }}>
         <button className="btn btn-primary" disabled={saving} onClick={save}>{saving ? '保存中…' : '保存任务'}</button>
@@ -493,6 +555,9 @@ export default function Tasks({ toast }) {
                 {t.pairs && t.pairs.length > 1 && <> · <span style={{ color: 'var(--indigo-600)', fontWeight: 600 }}>共 {t.pairs.length} 组文件夹</span></>}
               </div>
               <div style={{ color: 'var(--text-3)', fontSize: 12.5 }}>
+                {(t.mode === 'copy' || t.mode === 'bisync')
+                  ? <>{t.mode === 'copy' ? '单向增加' : '双向同步'} · </>
+                  : <>镜像 · </>}
                 {scheduleText(t.schedule)}
                 {t.enabled && t.nextRunAt && t.lastStatus !== 'running' && <> · 下次执行 {fmtTime(t.nextRunAt)}</>}
                 {t.enabled && !t.nextRunAt && t.lastStatus !== 'running' && <> · <span style={{ color: '#b97d1e' }}>近期无执行时间，请检查计划设置</span></>}
@@ -545,6 +610,8 @@ export default function Tasks({ toast }) {
               </div>
               {p.error ? (
                 <div style={{ color: 'var(--red-dark)', fontSize: 13.5, marginTop: 6 }}>这一组比对失败：{p.error}</div>
+              ) : p.note ? (
+                <div style={{ fontSize: 13.5, color: 'var(--text-2)', marginTop: 4 }}>{p.note}</div>
               ) : (
                 <>
                   <div style={{ fontSize: 13.5, color: 'var(--text-2)', marginTop: 4 }}>

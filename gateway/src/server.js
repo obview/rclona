@@ -12,12 +12,12 @@ import {
 import { rc, normalizeProviders, fsSpec, spawnCat } from './rc.js';
 import { cryptPasswordSet, setCryptPassword, clearCryptPassword } from './crypt.js';
 import { classifyError } from './classify.js';
-import { healthOf, testRemote } from './health.js';
+import { healthOf, testRemote, checkCapacity } from './health.js';
 import { runTask, isRunning, previewTask } from './runner.js';
 import { sendTestTelegram } from './notifier.js';
 import { normalizeSchedule, nextSlotAfter, validateCron, validHM } from './schedule.js';
 import { normalizePairFilters } from './filters.js';
-import { normalizeTaskOptionsInput } from './taskopts.js';
+import { normalizeTaskOptionsInput, normalizeSyncModeInput } from './taskopts.js';
 import { nextHealthCheckAt } from './scheduler.js';
 
 const SERVER_STARTED_AT = new Date().toISOString();
@@ -698,6 +698,10 @@ function validateTask(b) {
   });
   // #27：任务级高级选项（旧版本保留/删除安全阀/限速/改名识别/备份加密）；老客户端不传 = 全默认（行为不变）
   const options = normalizeTaskOptionsInput(b);
+  // #30：同步方式（mirror/copy/bisync）；不传 = mirror。双向同步与筛选已实测可组合、与加密
+  // 同为「目标走 crypt 视图」，均不拦；它与旧版本保留/安全阀/改名识别不适用，由界面隐藏、
+  // runner 忽略，不在这里报错（用户切换模式时不该被卡住）。
+  const mode = normalizeSyncModeInput(b);
   // 备份加密要用到全局的加密密码：没设密码就开启加密，任务跑起来必然失败，这里先拦下并说清去哪设
   if (options.crypt.enabled && !cryptPasswordSet()) {
     throw new Error('这个任务开启了备份加密，但你还没设置「备份加密密码」：请先到「设置」页填好密码再回来开启（密码丢失 = 加密的备份全部无法恢复，务必记牢）');
@@ -710,6 +714,7 @@ function validateTask(b) {
     dstPath: pairs[0].dst,
     pairs,
     schedule,
+    mode,
     versioning: options.versioning,
     maxDelete: options.maxDelete,
     bwlimit: options.bwlimit,

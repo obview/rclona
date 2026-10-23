@@ -75,3 +75,17 @@ export function normalizeTaskOptionsInput(b) {
   }
   return out;
 }
+
+// #30：同步方式（任务级）。mirror=镜像（sync，删除传染，产品最初的唯一模式）；
+// copy=单向增加（copy，只添/更新、永不删除）；bisync=双向同步（bisync，两边互相同步）。
+// 老任务没有 mode 字段 = mirror，行为与从前完全一致。
+export const SYNC_MODES = ['mirror', 'copy', 'bisync'];
+export function syncModeOf(task) {
+  return SYNC_MODES.includes(task?.mode) ? task.mode : 'mirror';
+}
+// 保存时校验：不传 = mirror（与 validateTask 的整表保存语义一致）；传了非法值抛中文错误
+export function normalizeSyncModeInput(b) {
+  if (b.mode === undefined || b.mode === null || b.mode === '') return 'mirror';
+  if (!SYNC_MODES.includes(b.mode)) throw new Error('同步方式不对：只能选镜像同步、单向增加或双向同步');
+  return b.mode;
+}

@@ -104,6 +104,35 @@ export const rc = {
     ...(filterRules?.length ? { _filter: { FilterRule: filterRules } } : {}),
     ...(configOpts && Object.keys(configOpts).length ? { _config: configOpts } : {})
   })).jobid,
+  // #30 单向增加：sync/copy——只往目标添/更新，永不删除（源删了目标不删、目标多余的保留）。
+  // _config 口径与 sync 相同（BackupDir/DryRun 实测生效，归档需同时带归档过滤规则，runner 已处理）。
+  copyAsync: async (srcFs, dstFs, filterRules, configOpts) => (await call('sync/copy', {
+    srcFs, dstFs, _async: true,
+    ...(filterRules?.length ? { _filter: { FilterRule: filterRules } } : {}),
+    ...(configOpts && Object.keys(configOpts).length ? { _config: configOpts } : {})
+  })).jobid,
+  // #30 双向同步：sync/bisync（1.75.2 实测 rc 可用、支持 _async 任务与 job 统计）。
+  // 参数口径（全部实测）：path1/path2 是两个 fs 规格；workdir 必传（bisync 的清单状态目录，
+  // 由 runner 按任务+组号分配并持久化）；首次必须 resync=true（等价 resync-mode=path1：
+  // 以 path1 为准对齐）；冲突 conflictResolve=newer（较新者胜）+ conflictLoser=pathname
+  // （输家改名留副本、两边都留，不直接删）；删除安全阈值用顶层 maxDelete=50（百分比，
+  // 与 rclone 命令行默认值一致——注意 _config.MaxDelete 不喂这个阈值，实测恒为 0% 会误拦一切删除）；
+  // 筛选走 _filter.FilterRule，实测与 bisync 兼容。
+  bisyncAsync: async (path1, path2, filterRules, opts = {}) => (await call('sync/bisync', {
+    path1, path2, _async: true,
+    // _config.CheckSum 必须关：网关的 rcd 全局开了 --checksum（镜像比对要用），但在 checksum
+    // 模式下 bisync 的清单只存哈希、修改时间记为零，「较新者胜」没时间可比 → 冲突时两边
+    // 文件会被一起改名成 .conflict 副本、原名消失（实测）。关掉后清单按修改时间记录，冲突
+    // 按「较新者胜 + 输家留 .conflict 副本」正确执行（同样实测）。
+    _config: { CheckSum: false },
+    conflictResolve: 'newer',
+    conflictLoser: 'pathname',
+    maxDelete: 50,
+    workdir: opts.workdir,
+    ...(opts.resync ? { resync: true, resyncMode: opts.resyncMode || 'path1' } : {}),
+    ...(opts.dryRun ? { dryRun: true } : {}),
+    ...(filterRules?.length ? { _filter: { FilterRule: filterRules } } : {})
+  })).jobid,
   jobStatus: (jobid) => call('job/status', { jobid }, 15000),
   stats: (group) => call('core/stats', { group }, 15000)
 };
