@@ -1,3 +1,5 @@
+import http from 'node:http';
+import https from 'node:https';
 import { store } from './store.js';
 import { cfg } from './config.js';
 
@@ -10,19 +12,44 @@ export function telegramReady() {
   return !!(t.enabled && t.botToken && t.chatId);
 }
 
+// 发一个 JSON POST 并解析 JSON 响应。刻意不用全局 fetch：undici 在「容器没有 IPv6 路由、
+// DNS 却返回 AAAA 记录」的常见 Docker 网络里会扑向 IPv6 并长时间挂起直到超时
+// （2026-10-23 线上实测：api.telegram.org 的 fetch 挂死、同容器 rclone(Go) 与 IPv4 一切正常，
+// 只有走 Node fetch 的 Telegram 通知中招）。改用 http/https 模块并锁定 family:4（IPv4）。
+function postJson(urlStr, payload, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    let url;
+    try { url = new URL(urlStr); } catch { reject(new Error('通知接口地址不正确')); return; }
+    const lib = url.protocol === 'https:' ? https : http;
+    const body = JSON.stringify(payload);
+    const req = lib.request(url, {
+      method: 'POST',
+      family: 4,
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) }
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        let data = {};
+        try { data = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}'); } catch { /* 非 JSON 响应按空对象处理 */ }
+        resolve({ status: res.statusCode || 0, data });
+      });
+    });
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('连接 Telegram 接口超时（服务器到 api.telegram.org 的网络不通）')));
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+
 async function sendTelegram(text, { force = false } = {}) {
   const t = tg();
   if (!t.enabled && !force) return { skipped: '通知未开启' };
   if (!t.botToken || !t.chatId) return { skipped: 'Telegram 配置不完整（缺机器人令牌或 Chat ID）' };
-  const res = await fetch(`${cfg.telegramApiBase}/bot${t.botToken}/sendMessage`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ chat_id: t.chatId, text }),
-    signal: AbortSignal.timeout(15000)
+  const { status, data } = await postJson(`${cfg.telegramApiBase}/bot${t.botToken}/sendMessage`, {
+    chat_id: t.chatId, text
   });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok || data.ok === false) {
-    throw new Error(data.description || `Telegram 接口返回 ${res.status}（请检查令牌与 Chat ID）`);
+  if (status < 200 || status >= 300 || data.ok === false) {
+    throw new Error(data.description || `Telegram 接口返回 ${status}（请检查令牌与 Chat ID）`);
   }
   return { sent: true };
 }
