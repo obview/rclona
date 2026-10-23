@@ -262,7 +262,7 @@ export default function Remotes({ toast, nav }) {
         {(remotes || []).map((r) => (
           <div className="task-row" key={r.name} style={r.paused ? { opacity: 0.82 } : undefined}>
             <BrandBadge remote={r} size={46} />
-            <div className="row-main" style={{ flex: 1 }}>
+            <div className="row-main">
               <div style={{ fontWeight: 700, fontSize: 15 }}>{r.name}</div>
               <div style={{ color: 'var(--text-3)', fontSize: 12.5 }}>
                 类型：{typeLabel(r.type)}
@@ -272,21 +272,23 @@ export default function Remotes({ toast, nav }) {
                 <div style={{ color: 'var(--text-3)', fontSize: 12.5 }}>{r.health.remark}</div>
               )}
             </div>
-            {r.paused && <span className="pill pill-off">已暂停</span>}
-            {!r.paused && r.health?.status === 'down' && <span className="pill pill-fail">✕ 连接失效</span>}
-            {!r.paused && r.health?.status === 'retrying' && <span className="pill pill-run">连接异常</span>}
-            {!r.paused && r.health?.status === 'ok' && <span className="pill pill-ok">✓ 连接正常</span>}
-            <button className="btn btn-ghost btn-sm" disabled={testing === r.name} onClick={() => test(r)}>
-              <Icon name="refresh" size={13} /> {testing === r.name ? '测试中…' : '测试连接'}
-            </button>
-            <button className="btn btn-ghost btn-sm" onClick={() => setEditing(r)}>
-              <Icon name="edit" size={13} /> 编辑
-            </button>
-            <button className="btn btn-ghost btn-sm" onClick={() => togglePause(r)}>
-              <Icon name={r.paused ? 'play' : 'pause'} size={13} /> {r.paused ? '恢复' : '暂停'}
-            </button>
-            <button className="btn-link" onClick={() => nav('tasks')}>建备份任务</button>
-            <button className="btn-link danger" onClick={() => remove(r)}>删除</button>
+            <div className="row-actions">
+              {r.paused && <span className="pill pill-off">已暂停</span>}
+              {!r.paused && r.health?.status === 'down' && <span className="pill pill-fail">✕ 连接失效</span>}
+              {!r.paused && r.health?.status === 'retrying' && <span className="pill pill-run">连接异常</span>}
+              {!r.paused && r.health?.status === 'ok' && <span className="pill pill-ok">✓ 连接正常</span>}
+              <button className="btn btn-ghost btn-sm" disabled={testing === r.name} onClick={() => test(r)}>
+                <Icon name="refresh" size={13} /> {testing === r.name ? '测试中…' : '测试连接'}
+              </button>
+              <button className="btn btn-ghost btn-sm" onClick={() => setEditing(r)}>
+                <Icon name="edit" size={13} /> 编辑
+              </button>
+              <button className="btn btn-ghost btn-sm" onClick={() => togglePause(r)}>
+                <Icon name={r.paused ? 'play' : 'pause'} size={13} /> {r.paused ? '恢复' : '暂停'}
+              </button>
+              <button className="btn-link" onClick={() => nav('tasks')}>建备份任务</button>
+              <button className="btn-link danger" onClick={() => remove(r)}>删除</button>
+            </div>
           </div>
         ))}
       </div>

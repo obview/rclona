@@ -239,7 +239,7 @@ export default function Tasks({ toast }) {
         {(tasks || []).map((t) => (
           <div className="task-row" key={t.id}>
             <div className="task-ico"><Icon name="sync" size={23} /></div>
-            <div className="row-main" style={{ flex: 1, minWidth: 0 }}>
+            <div className="row-main">
               <div style={{ fontWeight: 700, fontSize: 15 }}>{t.name}</div>
               <div style={{ color: 'var(--text-2)', fontSize: 13 }}>
                 从 <b>{t.srcRemote}</b>{t.srcPath ? '/' + t.srcPath : ''} → 到 <b>{t.dstRemote}</b>{t.dstPath ? '/' + t.dstPath : ''}
@@ -255,20 +255,22 @@ export default function Tasks({ toast }) {
                 {!t.lastStatus && <> · 尚未执行</>}
               </div>
             </div>
-            {t.lastStatus === 'running'
-              ? <span className="pill pill-run">备份中…</span>
-              : t.enabled ? <span className="pill pill-ok">已启用</span> : <span className="pill pill-off">已停用</span>}
-            <label className="switch" title={t.enabled ? '停用' : '启用'}>
-              <input type="checkbox" checked={t.enabled} onChange={() => toggle(t)} />
-              <span className="track" />
-            </label>
-            <button className="btn btn-primary btn-sm" disabled={runningId === t.id || t.lastStatus === 'running'} onClick={() => runNow(t)}>
+            <div className="row-actions">
               {t.lastStatus === 'running'
-                ? <><span className="spin" style={{ width: 13, height: 13, borderWidth: 2 }} /> 执行中…</>
-                : <><Icon name="play" size={13} /> 立即执行</>}
-            </button>
-            <button className="btn-link" onClick={() => setEditing(t)}>编辑</button>
-            <button className="btn-link danger" onClick={() => remove(t)}>删除</button>
+                ? <span className="pill pill-run">备份中…</span>
+                : t.enabled ? <span className="pill pill-ok">已启用</span> : <span className="pill pill-off">已停用</span>}
+              <label className="switch" title={t.enabled ? '停用' : '启用'}>
+                <input type="checkbox" checked={t.enabled} onChange={() => toggle(t)} />
+                <span className="track" />
+              </label>
+              <button className="btn btn-primary btn-sm" disabled={runningId === t.id || t.lastStatus === 'running'} onClick={() => runNow(t)}>
+                {t.lastStatus === 'running'
+                  ? <><span className="spin" style={{ width: 13, height: 13, borderWidth: 2 }} /> 执行中…</>
+                  : <><Icon name="play" size={13} /> 立即执行</>}
+              </button>
+              <button className="btn-link" onClick={() => setEditing(t)}>编辑</button>
+              <button className="btn-link danger" onClick={() => remove(t)}>删除</button>
+            </div>
           </div>
         ))}
       </div>
