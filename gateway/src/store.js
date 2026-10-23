@@ -65,7 +65,12 @@ export const store = {
                 st.files += r.stats?.transferred || 0;
                 st.lastRunFiles = r.stats?.transferred ?? 0;
                 st.lastRunBytes = r.stats?.bytes ?? 0;
-              } else st.failed++;
+              } else {
+                st.failed++;
+                // 与 bumpStats 同口径：失败记录里已传的部分也入账
+                st.bytes += r.stats?.bytes || 0;
+                st.files += r.stats?.transferred || 0;
+              }
             }
           }
           this.data.stats = st;
@@ -104,6 +109,9 @@ export const store = {
       st.lastRunBytes = run.stats?.bytes ?? 0;
     } else if (run.status === 'failed') {
       st.failed++;
+      // #18：失败前已传出的部分也如实入账（以前一律记 0，与目标端实际收到的对不上）
+      st.bytes += run.stats?.bytes || 0;
+      st.files += run.stats?.transferred || 0;
     }
     this.save();
   },

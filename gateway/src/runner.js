@@ -52,6 +52,28 @@ export async function hostExcludesFor(task) {
   return HOST_VIRTUAL_DIRS.map((d) => `${d}/**`);
 }
 
+// #18：经 WebDAV 工具（Flaredrive 等）写过的对象存储桶里常有「目录占位对象」——
+// 一个 0 字节对象，其路径同时又是其它对象的目录前缀（如 appdata/legado 既是空文件、
+// 又有 appdata/legado/… 的内容）。同步时目标端先建好同名目录、再放同名文件会被拒绝
+// （Koofr 回 HTTP 400），整个任务被一颗空占位绊倒判失败；占位本身 0 字节、不含任何数据。
+// 同步前用递归列表把它们识别出来逐个精确排除（只跳过不动源；非 0 字节或没有同名
+// 目录内容的普通文件绝不排除——判定要求「存在另一条目以『该路径 + /』开头」）。
+export async function findPlaceholderPaths(fs) {
+  const { list } = await rc.listAll(fs);
+  const entries = list || [];
+  // 收集所有「是某个条目的上级目录」的路径（等价于：存在另一条目以「该路径 + /」开头）
+  const ancestors = new Set();
+  for (const it of entries) {
+    const parts = String(it.Path || '').split('/');
+    for (let i = 1; i < parts.length; i++) ancestors.add(parts.slice(0, i).join('/'));
+  }
+  const out = [];
+  for (const it of entries) {
+    if (!it.IsDir && (it.Size || 0) === 0 && it.Path && ancestors.has(it.Path)) out.push(it.Path);
+  }
+  return out;
+}
+
 export async function runTask(task, trigger = 'manual') {
   if (running.has(task.id)) return { skipped: true, reason: '该任务正在执行中' };
 
@@ -110,7 +132,7 @@ export async function runTask(task, trigger = 'manual') {
   const dstFs = fsSpec(task.dstRemote, task.dstPath);
   log(`开始备份：${srcFs} → ${dstFs}（${trigger === 'schedule' ? '定时' : '手动'}触发）`);
   // #14：源是宿主机根目录（/host）时，自动排除系统虚拟目录（扫描/同步/校验全程一致）
-  const excludeRules = await hostExcludesFor(task).catch(() => null);
+  let excludeRules = await hostExcludesFor(task).catch(() => null);
   const skipTopDirs = excludeRules ? new Set(HOST_VIRTUAL_DIRS) : null;
   if (excludeRules) log(`源是服务器根目录（${HOST_MOUNT}），已自动排除系统虚拟目录：${HOST_VIRTUAL_DIRS.join('、')}`);
 
@@ -181,28 +203,44 @@ export async function runTask(task, trigger = 'manual') {
     setStage(2, 'ok', Date.now() - t0);
     log('目标网盘连接正常');
 
+    // #18：识别同名空占位并逐个精确排除，与 /host 排除合并后同一份规则传给 sync 与 check。
+    // 检测本身出问题不能反过来绊倒备份：记一句日志、按原样继续。
+    try {
+      const placeholders = await findPlaceholderPaths(srcFs);
+      if (placeholders.length) {
+        excludeRules = [...(excludeRules || []), ...placeholders];
+        log(`已自动跳过 ${placeholders.length} 个空占位对象（0 字节、与文件夹同名）：${placeholders.join('、')}`);
+      }
+    } catch (e) {
+      log(`空占位对象检测未完成（${e.message}），按原样继续同步`);
+    }
+
     // 阶段 4：真正传输（rc sync 异步任务，轮询状态）
     t0 = Date.now();
     setStage(3, 'running');
     let jobid;
     try { jobid = await rc.syncAsync(srcFs, dstFs, excludeRules); }
     catch (e) { return fail(3, e.message); }
+    // 把这次同步的统计搬进记录：成功时是最终账，失败/超时时是「已传部分」的如实账（#18，不再记 0）
+    const pullJobStats = async () => {
+      try {
+        const st = await rc.stats(`job/${jobid}`);
+        run.stats.transferred = st.transfers ?? 0;
+        run.stats.bytes = st.bytes ?? 0;
+        run.stats.deletes = st.deletes ?? 0;
+        if (typeof st.checks === 'number') run.stats.checked = Math.max(run.stats.checked || 0, st.checks);
+      } catch { /* 统计拿不到不影响结果 */ }
+    };
     const deadline = Date.now() + cfg.runTimeoutMs;
     let job = null;
     for (;;) {
       await new Promise((r) => setTimeout(r, 1500));
       try { job = await rc.jobStatus(jobid); } catch { continue; }
       if (job.finished) break;
-      if (Date.now() > deadline) return fail(3, '同步超时（超过设定时长仍未完成）');
+      if (Date.now() > deadline) { await pullJobStats(); return fail(3, '同步超时（超过设定时长仍未完成）'); }
     }
-    if (!job.success) return fail(3, job.error || '同步任务失败');
-    try {
-      const st = await rc.stats(`job/${jobid}`);
-      run.stats.transferred = st.transfers ?? 0;
-      run.stats.bytes = st.bytes ?? 0;
-      run.stats.deletes = st.deletes ?? 0;
-      if (typeof st.checks === 'number') run.stats.checked = Math.max(run.stats.checked || 0, st.checks);
-    } catch { /* 统计拿不到不影响结果 */ }
+    if (!job.success) { await pullJobStats(); return fail(3, job.error || '同步任务失败'); }
+    await pullJobStats();
     setStage(3, 'ok', Date.now() - t0);
     log(`传输完成：同步了 ${run.stats.transferred ?? 0} 个文件`);
 

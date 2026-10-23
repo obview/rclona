@@ -79,6 +79,8 @@ export const rc = {
   providers: () => call('config/providers'),
   // 列一层目录（真实读取，可用于连通性测试）
   list: (fs, remote = '') => call('operations/list', { fs, remote }, 45000),
+  // 递归列出全部条目（#18 占位对象检测用；opt.recurse 是 operations/list 的选项，v1.75.2 实测可用）
+  listAll: (fs) => call('operations/list', { fs, remote: '', opt: { recurse: true } }, 120000),
   // 创建目录（连同上级目录一并创建），备份执行时用来自动补建不存在的目标目录
   mkdir: (fs, remote = '') => call('operations/mkdir', { fs, remote }, 45000),
   about: (fs) => call('operations/about', { fs }, 30000),

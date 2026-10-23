@@ -619,6 +619,104 @@ async function main() {
         '真坏密钥网盘不被误判为 ok、无单桶 remark');
     } finally { s3DeniedSrv.close(); s3BadSrv.close(); }
 
+    console.log('== 15. 热修 #18：同名空占位自动跳过 / Koofr 400 分类 / 失败部分统计如实记账 ==');
+    // 15a 分类器：Koofr 复制 400 错误 → 「冲突」类白话原因，不再落「未知原因」
+    const koofrCls = classifyError('2026/10/23 09:03:46 ERROR : appdata/legado: Failed to copy: Invalid response status! Got 400, expected [200]; content length 0');
+    ok(koofrCls.kind === 'conflict' && /拒绝写入/.test(koofrCls.reasonZh) && /同名/.test(koofrCls.reasonZh),
+      'Koofr「Failed to copy: Invalid response status! Got 400」→ 目标拒绝写入（同名冲突）', koofrCls.reasonZh);
+    ok(classifyError('Failed to copy: Invalid response status! Got 503, expected [200]').kind === 'conflict',
+      'Invalid response status + Got 5xx 变体同样归冲突类');
+
+    // 15b 占位复现：memory 后端能让「0 字节文件」与「同名目录」并存（本地磁盘造不出来），
+    // 分三步把 fixture 灌进同一个 rcd 的 memory 网盘，再走面板任务全流程验证自动跳过
+    const rcdCall = async (m, p) => {
+      const r = await fetch(`http://127.0.0.1:5599/${m}`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p)
+      });
+      return r.json();
+    };
+    const stA = path.join(T, 'stageA'); // appdata/legado（0 字节占位文件）、appdata/empty.txt（普通 0 字节文件，不能误跳）
+    const stB = path.join(T, 'stageB'); // appdata/legado/inner.txt、appdata/legado/bookProgress/deep.txt、appdata/other.txt
+    const stC = path.join(T, 'stageC'); // bookProgress（0 字节）→ 灌到 appdata/legado/ 下，形成第二层占位
+    fs.mkdirSync(path.join(stA, 'appdata'), { recursive: true });
+    fs.mkdirSync(path.join(stB, 'appdata', 'legado', 'bookProgress'), { recursive: true });
+    fs.mkdirSync(stC, { recursive: true });
+    fs.writeFileSync(path.join(stA, 'appdata', 'legado'), '');
+    fs.writeFileSync(path.join(stA, 'appdata', 'empty.txt'), '');
+    fs.writeFileSync(path.join(stB, 'appdata', 'legado', 'inner.txt'), 'realdata');
+    fs.writeFileSync(path.join(stB, 'appdata', 'legado', 'bookProgress', 'deep.txt'), 'deepdata');
+    fs.writeFileSync(path.join(stB, 'appdata', 'other.txt'), 'other');
+    fs.writeFileSync(path.join(stC, 'bookProgress'), '');
+    const memRes = await api('POST', '/api/remotes', { name: 'tmem', type: 'memory', config: {} });
+    ok(memRes.status === 200, 'memory 网盘创建成功（与网关共用同一 rcd 进程）');
+    await rcdCall('sync/copy', { srcFs: stC, dstFs: 'tmem:appdata/legado' });
+    await rcdCall('sync/copy', { srcFs: stA, dstFs: 'tmem:' });
+    await rcdCall('sync/copy', { srcFs: stB, dstFs: 'tmem:' });
+    const memList = await rcdCall('operations/list', { fs: 'tmem:', remote: '', opt: { recurse: true } });
+    const legadoAsFile = (memList.list || []).find((e) => e.Path === 'appdata/legado' && !e.IsDir && e.Size === 0);
+    const legadoAsDir = (memList.list || []).find((e) => e.Path === 'appdata/legado' && e.IsDir);
+    const bpAsFile = (memList.list || []).find((e) => e.Path === 'appdata/legado/bookProgress' && !e.IsDir && e.Size === 0);
+    ok(!!legadoAsFile && !!legadoAsDir && !!bpAsFile,
+      '前置：源里两处占位形态已复现（0 字节文件与同名目录并存，含嵌套一层）');
+    const phDst = path.join(T, 'phbak');
+    const phTask = await api('POST', '/api/tasks', {
+      name: '占位跳过', srcRemote: 'tmem', srcPath: '',
+      dstRemote: 'tdst', dstPath: phDst, schedule: { type: 'daily', time: '04:00' }
+    });
+    await api('POST', `/api/tasks/${phTask.data.task.id}/run`);
+    const phRun = await waitFor(async () => {
+      const d = await api('GET', `/api/runs?taskId=${phTask.data.task.id}`);
+      const r = d.data.runs?.[0];
+      return r && r.status !== 'running' ? r : null;
+    }, 60000);
+    ok(phRun.status === 'success', '含同名占位的备份成功（不再被空占位绊倒判失败）',
+      `状态=${phRun.status} ${phRun.reasonZh || ''}`);
+    ok(fs.readFileSync(path.join(phDst, 'appdata', 'legado', 'inner.txt'), 'utf8') === 'realdata'
+      && fs.readFileSync(path.join(phDst, 'appdata', 'legado', 'bookProgress', 'deep.txt'), 'utf8') === 'deepdata'
+      && fs.readFileSync(path.join(phDst, 'appdata', 'other.txt'), 'utf8') === 'other',
+      '占位同名目录里的真文件全部同步到位（精确排除没误伤目录）');
+    ok(fs.existsSync(path.join(phDst, 'appdata', 'empty.txt'))
+      && fs.statSync(path.join(phDst, 'appdata', 'empty.txt')).size === 0,
+      '普通 0 字节文件（无同名目录）照常同步、未被误跳');
+    ok(fs.statSync(path.join(phDst, 'appdata', 'legado')).isDirectory()
+      && fs.statSync(path.join(phDst, 'appdata', 'legado', 'bookProgress')).isDirectory(),
+      '目标端两处占位位置都是目录（空文件没有占位成功）');
+    ok(/已自动跳过 2 个空占位对象（0 字节、与文件夹同名）/.test(phRun.logExcerpt || '')
+      && (phRun.logExcerpt || '').includes('appdata/legado')
+      && (phRun.logExcerpt || '').includes('appdata/legado/bookProgress'),
+      '运行日志注明跳过了 2 个空占位并列出路径');
+
+    // 15c 传输中途失败：已传部分如实记入记录与全局统计（以前一律记 0）
+    const fSrc = path.join(T, 'failsrc');
+    const fDst = path.join(T, 'faildst');
+    fs.mkdirSync(path.join(fSrc, 'sub'), { recursive: true });
+    fs.mkdirSync(fDst, { recursive: true });
+    fs.writeFileSync(path.join(fSrc, 'top1.txt'), 'aaaa');
+    fs.writeFileSync(path.join(fSrc, 'top2.txt'), 'bbbbbb');
+    fs.writeFileSync(path.join(fSrc, 'sub', 'inner.txt'), 'inner');
+    fs.writeFileSync(path.join(fDst, 'sub'), '我是挡路的文件'); // 目标端同名位置是个文件，sub/inner.txt 必然传不过去
+    const statsBefore = (await api('GET', '/api/overview')).data.stats;
+    const fTask = await api('POST', '/api/tasks', {
+      name: '中途失败', srcRemote: 'tsrc', srcPath: fSrc,
+      dstRemote: 'tdst', dstPath: fDst, schedule: { type: 'daily', time: '04:00' }
+    });
+    await api('POST', `/api/tasks/${fTask.data.task.id}/run`);
+    const fRun = await waitFor(async () => {
+      const d = await api('GET', `/api/runs?taskId=${fTask.data.task.id}`);
+      const r = d.data.runs?.[0];
+      return r && r.status !== 'running' ? r : null;
+    }, 60000);
+    ok(fRun.status === 'failed' && fRun.failedStage === 3, '传输中途失败 → 定位在阶段4（传输文件）',
+      `状态=${fRun.status} 阶段=${fRun.failedStage} 原因=${fRun.reasonZh}`);
+    ok((fRun.stats?.transferred ?? 0) >= 2 && (fRun.stats?.bytes ?? 0) > 0,
+      '失败记录里记下了已传文件数与字节数（不再是 0）',
+      `transferred=${fRun.stats?.transferred} bytes=${fRun.stats?.bytes}`);
+    const statsAfter = (await api('GET', '/api/overview')).data.stats;
+    ok(statsAfter.files === statsBefore.files + (fRun.stats?.transferred || 0)
+      && statsAfter.bytes === statsBefore.bytes + (fRun.stats?.bytes || 0),
+      '全局累计文件数/字节数把失败的已传部分也算了进去',
+      `files ${statsBefore.files}→${statsAfter.files}，bytes ${statsBefore.bytes}→${statsAfter.bytes}`);
+
     console.log(failures === 0 ? '\n全部自测通过 ✅' : `\n有 ${failures} 项未通过 ❌`);
   } finally {
     gw.kill('SIGTERM');

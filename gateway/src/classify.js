@@ -8,6 +8,11 @@ const RULES = [
     reason: '空间不足（目标网盘容量不够，删掉一些文件或扩容后重试）' },
   { kind: 'network', re: /dial tcp|i\/o timeout|connection refused|connection reset|no such host|network is unreachable|econnrefused|enotfound|etimedout|tls handshake|context deadline|server misbehaving|broken pipe|unexpected eof/i,
     reason: '连接不上（网络不通或对方服务暂时不可达）' },
+  // #18：Koofr 系后端在「文件与文件夹同名」等冲突时，复制会报
+  // "Failed to copy: Invalid response status! Got 400, expected [200]"——目标端明确拒绝这次写入。
+  // （#18 的自动跳过已让同名占位不再触发它，这条主要兜底其它目标端/其它冲突。）
+  { kind: 'conflict', re: /(failed to copy|failed to move)[\s\S]{0,200}(invalid response status|got 400\b)|invalid response status[\s\S]{0,80}got \d{3}/i,
+    reason: '目标网盘拒绝写入某个文件（常见于文件与文件夹同名冲突）' },
   { kind: 'auth', re: /invalidaccesskeyid|signaturedoesnotmatch|invalidclienttokenid|invalid access key|\b401\b|unauthorized|authentication failed|login failed|wrong password|invalid login|invalid credentials|credentials.*(invalid|error)/i,
     reason: '凭证不正确或已失效（密钥 / 应用密码填错了，或已被服务商作废；请到「网盘管理」点「编辑」核对后重试）' },
   { kind: 'permission', re: /accessdenied|access denied|permission denied|operation not permitted|read-only file system|access forbidden|\b403\b/i,

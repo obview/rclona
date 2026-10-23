@@ -11,6 +11,11 @@ export function runSummary(run) {
     if (s.transferred) return `传输了 ${s.transferred} 个文件（${fmtBytes(s.bytes || 0)}）`;
     return '没有文件变化，两边已经一致';
   }
+  if (run.status === 'failed') {
+    const s = run.stats || {};
+    // #18：失败前已传出的部分如实写进一句话摘要，不再看上去像一个文件都没动
+    if (s.transferred) return `已传 ${s.transferred} 个文件后失败：${run.reasonZh || '备份失败'}`;
+  }
   return run.reasonZh || '备份失败';
 }
 
