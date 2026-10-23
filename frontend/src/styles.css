@@ -209,6 +209,21 @@ input, select, textarea { font-family: inherit; font-size: 14px; color: var(--te
   border: 1.5px solid var(--border); border-radius: 9px; padding: 9px 12px; background: #fff; width: 100%;
 }
 .input:focus, .select:focus, .textarea:focus { outline: none; border-color: var(--indigo-500); box-shadow: 0 0 0 3px var(--indigo-50); }
+/* #25：任务表单的文件夹映射行（一行一组：源 → 目标 + 删除） */
+.pair-map-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+.pair-map-no { font-size: 12.5px; color: var(--text-3); flex: 0 0 auto; min-width: 42px; }
+.pair-map-cell {
+  flex: 1 1 150px; min-width: 0; text-align: left; cursor: pointer;
+  border: 1.5px solid var(--border); border-radius: 9px; background: #fbfcff;
+  padding: 8px 11px; font-size: 13px; color: var(--text-1);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.pair-map-cell:hover { border-color: var(--indigo-500); }
+.pair-map-tag {
+  display: inline-block; font-size: 11px; font-weight: 700; color: var(--indigo-600);
+  background: var(--indigo-50); border-radius: 5px; padding: 1px 6px; margin-right: 7px;
+}
+.pair-map-arrow { color: var(--text-3); flex: 0 0 auto; }
 .switch { position: relative; width: 42px; height: 24px; flex: 0 0 auto; display: inline-block; }
 .switch input { opacity: 0; width: 0; height: 0; }
 .switch .track { position: absolute; inset: 0; border-radius: 999px; background: #ccd1e4; transition: .2s; cursor: pointer; }

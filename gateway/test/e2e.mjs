@@ -731,6 +731,85 @@ async function main() {
       '全局累计文件数/字节数把失败的已传部分也算了进去',
       `files ${statsBefore.files}→${statsAfter.files}，bytes ${statsBefore.bytes}→${statsAfter.bytes}`);
 
+    console.log('== 16. #25：一个任务多组文件夹映射 + 老任务自动迁移 ==');
+    // 16a 迁移：第 12 节注入的 legacy-task-1 只有 srcPath/dstPath，重启迁移后应带 pairs 且与老字段一致
+    const tasks16 = await api('GET', '/api/tasks');
+    const legacy16 = tasks16.data.tasks.find((t) => t.id === 'legacy-task-1');
+    ok(!!legacy16 && Array.isArray(legacy16.pairs) && legacy16.pairs.length === 1
+      && legacy16.pairs[0].src === srcDir && legacy16.pairs[0].dst === dstDir
+      && legacy16.srcPath === srcDir && legacy16.dstPath === dstDir,
+      '老单组任务自动迁移为 pairs（src/dst 与原 srcPath/dstPath 一致，镜像字段保留）',
+      JSON.stringify(legacy16?.pairs));
+
+    // 16b 多组任务真跑：两组不同源目录 → 两个不同目标目录，各就各位
+    const mSrc1 = path.join(T, 'multi', 'docs');
+    const mSrc2 = path.join(T, 'multi', 'pics');
+    const mDst1 = path.join(T, 'multibak', 'docs');
+    const mDst2 = path.join(T, 'multibak', 'pics');
+    fs.mkdirSync(mSrc1, { recursive: true });
+    fs.mkdirSync(mSrc2, { recursive: true });
+    fs.writeFileSync(path.join(mSrc1, 'report.txt'), 'doc-content');
+    fs.writeFileSync(path.join(mSrc2, 'photo.txt'), 'pic-content');
+    fs.writeFileSync(path.join(mSrc2, 'photo2.txt'), 'pic-content-2');
+    const mTask = await api('POST', '/api/tasks', {
+      name: '多组映射', srcRemote: 'tsrc', dstRemote: 'tdst',
+      pairs: [{ src: mSrc1, dst: mDst1 }, { src: mSrc2, dst: mDst2 }],
+      schedule: { type: 'daily', time: '04:00' }
+    });
+    ok(mTask.status === 200 && mTask.data.task.pairs?.length === 2
+      && mTask.data.task.srcPath === mSrc1 && mTask.data.task.dstPath === mDst1,
+      '多组任务创建成功（pairs 保存、srcPath 镜像为第一组）', `status=${mTask.status}`);
+    await api('POST', `/api/tasks/${mTask.data.task.id}/run`);
+    const mRun = await waitFor(async () => {
+      const d = await api('GET', `/api/runs?taskId=${mTask.data.task.id}`);
+      const r = d.data.runs?.[0];
+      return r && r.status !== 'running' ? r : null;
+    }, 60000);
+    ok(mRun.status === 'success', '多组任务整体成功（全部组成功才算成功）',
+      `状态=${mRun.status} ${mRun.reasonZh || ''}`);
+    ok(fs.readFileSync(path.join(mDst1, 'report.txt'), 'utf8') === 'doc-content'
+      && fs.readFileSync(path.join(mDst2, 'photo.txt'), 'utf8') === 'pic-content'
+      && fs.readFileSync(path.join(mDst2, 'photo2.txt'), 'utf8') === 'pic-content-2',
+      '两组的文件各就各位（组1到目标1、组2到目标2）');
+    ok(Array.isArray(mRun.pairs) && mRun.pairs.length === 2 && mRun.pairs.every((x) => x.status === 'success'),
+      '运行记录带每组结果（2 组均为 success）');
+    ok((mRun.stats?.transferred ?? 0) >= 3, '统计按全部组汇总（文件数 ≥3）',
+      `transferred=${mRun.stats?.transferred}`);
+    ok(/第 1 组/.test(mRun.logExcerpt || '') && /第 2 组/.test(mRun.logExcerpt || ''),
+      '日志按组分段（有第 1 组 / 第 2 组小节）');
+
+    // 16c 一组失败不阻断另一组：记录为失败、写明失败组与阶段，成功组文件已到位
+    const mixDstOk = path.join(T, 'multibak', 'ok-side');
+    const mixTask = await api('POST', '/api/tasks', {
+      name: '多组一组失败', srcRemote: 'tsrc', dstRemote: 'tdst',
+      pairs: [{ src: '/no/such/multi-dir', dst: path.join(T, 'multibak', 'bad-side') }, { src: mSrc1, dst: mixDstOk }],
+      schedule: { type: 'daily', time: '04:00' }
+    });
+    await api('POST', `/api/tasks/${mixTask.data.task.id}/run`);
+    const mixRun = await waitFor(async () => {
+      const d = await api('GET', `/api/runs?taskId=${mixTask.data.task.id}`);
+      const r = d.data.runs?.[0];
+      return r && r.status !== 'running' ? r : null;
+    }, 60000);
+    ok(mixRun.status === 'failed' && mixRun.failedStage === 0,
+      '一组失败 → 整体记录为失败、失败阶段取第一处失败（阶段1）',
+      `状态=${mixRun.status} 阶段=${mixRun.failedStage} 原因=${mixRun.reasonZh}`);
+    ok(/第 1 组/.test(mixRun.reasonZh || '') && mixRun.pairs?.[0]?.status === 'failed'
+      && mixRun.pairs?.[1]?.status === 'success',
+      '记录里写清失败的是哪一组、另一组为成功', mixRun.reasonZh || '');
+    ok(fs.readFileSync(path.join(mixDstOk, 'report.txt'), 'utf8') === 'doc-content',
+      '失败组没有阻断后面组：成功组文件已到位');
+    ok((mixRun.stats?.transferred ?? 0) >= 1, '混合成败时统计仍汇总成功组已传文件',
+      `transferred=${mixRun.stats?.transferred}`);
+
+    // 16d 校验：pairs 给了就必须非空
+    const emptyPairs = await api('POST', '/api/tasks', {
+      name: '空映射', srcRemote: 'tsrc', dstRemote: 'tdst', pairs: [],
+      schedule: { type: 'daily', time: '04:00' }
+    });
+    ok(emptyPairs.status !== 200 && /至少要有一组/.test(emptyPairs.data?.error || ''),
+      'pairs 为空数组被拒绝（中文提示）', emptyPairs.data?.error || '');
+
     console.log(failures === 0 ? '\n全部自测通过 ✅' : `\n有 ${failures} 项未通过 ❌`);
   } finally {
     gw.kill('SIGTERM');

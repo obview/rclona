@@ -10,6 +10,17 @@ export function newId() {
   return Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
 }
 
+// #25：一个任务可有多组文件夹映射 pairs[{src, dst}]（源/目标网盘与定时仍是任务级）。
+// 老任务只有单组字段 srcPath/dstPath —— 统一在这里换算成 pairs；
+// 任务上同时保留 srcPath/dstPath 作为 pairs[0] 的镜像，概览等老代码读它们不受影响。
+export function pairsOf(t) {
+  const clean = (v) => String(v ?? '').replace(/\/+$/, '');
+  if (Array.isArray(t?.pairs) && t.pairs.length) {
+    return t.pairs.map((p) => ({ src: clean(p?.src), dst: clean(p?.dst) }));
+  }
+  return [{ src: clean(t?.srcPath), dst: clean(t?.dstPath) }];
+}
+
 const DEFAULT_STATS = () => ({
   runs: 0, success: 0, failed: 0, // 累计完成备份次数（成功+失败，跳过不计）
   bytes: 0, files: 0, // 累计传输量 / 文件数
@@ -49,6 +60,10 @@ export const store = {
         for (const t of this.data.tasks || []) {
           t.schedule = normalizeSchedule(t.schedule);
           if (!t.anchorAt) t.anchorAt = t.createdAt || new Date().toISOString();
+          // #25：单组老任务自动迁移为 pairs；srcPath/dstPath 同步为第一组镜像（线上真任务原样等价）
+          t.pairs = pairsOf(t);
+          t.srcPath = t.pairs[0].src;
+          t.dstPath = t.pairs[0].dst;
         }
         // 累计计数：老数据没有就从已有运行记录里播种一次
         if (parsed.stats) {

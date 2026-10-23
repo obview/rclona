@@ -427,12 +427,29 @@ function validateTask(b) {
     throw new Error('执行时间格式不对（例如 03:30）');
   }
   if (schedule.time) schedule.time = validHM(schedule.time);
+  // #25：文件夹映射列表。优先用 pairs（多组）；兼容只传单组 srcPath/dstPath 的老客户端。
+  // 路径为空字符串表示网盘根目录，是合法选择；但一组都不能没有。
+  let rawPairs;
+  if (b.pairs !== undefined) {
+    if (!Array.isArray(b.pairs) || !b.pairs.length) throw new Error('至少要有一组文件夹映射（源文件夹 → 目标文件夹）');
+    rawPairs = b.pairs;
+  } else {
+    rawPairs = [{ src: b.srcPath, dst: b.dstPath }];
+  }
+  const cleanPath = (v) => String(v ?? '').replace(/\/+$/, '');
+  const pairs = rawPairs.map((p) => ({ src: cleanPath(p?.src), dst: cleanPath(p?.dst) }));
+  pairs.forEach((p, i) => {
+    if (srcRemote === dstRemote && p.src === p.dst) {
+      throw new Error(`第 ${i + 1} 组的源和目标是同一个位置，换一个目标文件夹`);
+    }
+  });
   return {
     name: name || `${srcRemote} → ${dstRemote}`,
     srcRemote,
-    srcPath: String(b.srcPath || '').replace(/\/+$/, ''),
+    srcPath: pairs[0].src, // 镜像：第一组（概览等老展示读它）
     dstRemote,
-    dstPath: String(b.dstPath || '').replace(/\/+$/, ''),
+    dstPath: pairs[0].dst,
+    pairs,
     schedule
   };
 }

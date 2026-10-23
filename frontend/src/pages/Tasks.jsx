@@ -1,15 +1,18 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
-import { BrandBadge, FolderPicker, Icon, Modal } from '../components.jsx';
+import { FolderPicker, Icon, Modal } from '../components.jsx';
 import { fmtAgo, fmtTime, scheduleText, WEEKDAYS } from '../util.js';
 
 function TaskForm({ remotes, initial, onDone, toast }) {
   const [name, setName] = useState(initial?.name || '');
   const [srcRemote, setSrcRemote] = useState(initial?.srcRemote || '');
-  const [srcPath, setSrcPath] = useState(initial?.srcPath || '');
   const [dstRemote, setDstRemote] = useState(initial?.dstRemote || '');
-  const [dstPath, setDstPath] = useState(initial?.dstPath || '');
-  const [picking, setPicking] = useState(''); // 'src' | 'dst' | ''
+  // #25：文件夹映射列表（源网盘、目标网盘是任务级的；每组各选一个源文件夹与目标文件夹）
+  const [pairs, setPairs] = useState(() => {
+    if (initial?.pairs && initial.pairs.length) return initial.pairs.map((x) => ({ src: x.src || '', dst: x.dst || '' }));
+    return [{ src: initial?.srcPath || '', dst: initial?.dstPath || '' }];
+  });
+  const [picking, setPicking] = useState(null); // { idx, side: 'src' | 'dst' }
   const s0 = initial?.schedule || {};
   const [schedType, setSchedType] = useState(s0.type || 'daily');
   const [time, setTime] = useState(s0.time || '03:30');
@@ -22,17 +25,25 @@ function TaskForm({ remotes, initial, onDone, toast }) {
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
 
-  const srcR = remotes.find((r) => r.name === srcRemote);
-  const dstR = remotes.find((r) => r.name === dstRemote);
-
   function toggleWeekday(d) {
     setWeekdays((prev) => prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d].sort((a, b) => a - b));
+  }
+  function setPairPath(idx, side, path) {
+    setPairs((prev) => prev.map((x, i) => (i === idx ? { ...x, [side]: path } : x)));
+  }
+  function changeRemote(side, value) {
+    // 换了网盘，原来在旧网盘里选的文件夹路径就不作数了，清掉这一侧全部组的选择
+    if (side === 'src') { setSrcRemote(value); setPairs((prev) => prev.map((x) => ({ ...x, src: '' }))); }
+    else { setDstRemote(value); setPairs((prev) => prev.map((x) => ({ ...x, dst: '' }))); }
+    if (picking && picking.side === side) setPicking(null);
   }
 
   async function save() {
     setErr('');
     if (!srcRemote || !dstRemote) { setErr('请先选好源网盘和目标网盘'); return; }
-    if (srcRemote === dstRemote && srcPath === dstPath) { setErr('源和目标不能是同一个位置'); return; }
+    if (!pairs.length) { setErr('至少要有一组文件夹映射'); return; }
+    const sameIdx = pairs.findIndex((x) => srcRemote === dstRemote && x.src === x.dst);
+    if (sameIdx >= 0) { setErr(`第 ${sameIdx + 1} 组的源和目标是同一个位置，换一个目标文件夹`); return; }
     if (schedType === 'weekly' && weekdays.length === 0) { setErr('每周方式至少要选一个星期'); return; }
     if (schedType === 'cron' && cron.trim().split(/\s+/).length !== 5) { setErr('cron 表达式要是五段：分 时 日 月 周，例如 30 3 * * *'); return; }
     setSaving(true);
@@ -44,7 +55,7 @@ function TaskForm({ remotes, initial, onDone, toast }) {
     if (schedType === 'cron') schedule.cron = cron.trim();
     const body = {
       name: name.trim() || `${srcRemote} → ${dstRemote}`,
-      srcRemote, srcPath, dstRemote, dstPath, schedule
+      srcRemote, dstRemote, pairs, schedule
     };
     try {
       if (initial?.id) await api.put(`/tasks/${initial.id}`, body);
@@ -55,54 +66,73 @@ function TaskForm({ remotes, initial, onDone, toast }) {
     setSaving(false);
   }
 
-  const pickSide = (side, remote, setRemote, path) => (
-    <div className={`pick-side${remote ? ' filled' : ''}`} onClick={() => { if (!remote) setPicking(side); }}>
-      {remote ? (
-        <>
-          <BrandBadge remote={remotes.find((r) => r.name === remote)} size={54} />
-          <div className="p-name" style={{ fontSize: 15, fontWeight: 600, marginTop: 8 }}>{remote}</div>
-          <div style={{ color: 'var(--text-3)', fontSize: 12.5 }}>{path ? (path.startsWith('/') ? path : '/' + path) : '/（根目录）'}</div>
-          <button className="btn-link" onClick={(e) => { e.stopPropagation(); setPicking(side); }}>重新选择</button>
-        </>
-      ) : (
-        <>
-          <div style={{ color: 'var(--indigo-500)' }}><Icon name="plus" size={30} /></div>
-          <div style={{ marginTop: 8, fontWeight: 600 }}>{side === 'src' ? '选择源网盘' : '选择目标网盘'}</div>
-          <div style={{ color: 'var(--text-3)', fontSize: 12.5 }}>点这里挑选网盘与文件夹</div>
-        </>
-      )}
-    </div>
-  );
+  const pathLabel = (path) => (path ? (path.startsWith('/') ? path : '/' + path) : '/（根目录）');
+  const pickRemote = picking ? (picking.side === 'src' ? srcRemote : dstRemote) : '';
+  const pickRemoteType = (remotes.find((r) => r.name === pickRemote) || {}).type;
 
   return (
     <div>
       {err && <div className="login-err">{err}</div>}
-      <div className="pair-flow" style={{ marginBottom: 16 }}>
-        {pickSide('src', srcRemote, setSrcRemote, srcPath)}
-        <div className="pair-mid" style={{ minWidth: 90 }}>
-          <svg width="72" height="14" viewBox="0 0 104 14"><line x1="2" y1="7" x2="90" y2="7" stroke="#b9bedd" strokeWidth="2.5" strokeDasharray="1 7" strokeLinecap="round" /><path d="M90 1l10 6-10 6z" fill="#b9bedd" /></svg>
+      <div className="form-grid" style={{ marginBottom: 6 }}>
+        <div className="field">
+          <label>源网盘</label>
+          <select className="select" value={srcRemote} onChange={(e) => changeRemote('src', e.target.value)}>
+            <option value="">请选择网盘…</option>
+            {remotes.map((r) => <option key={r.name} value={r.name}>{r.name}（{r.type}）</option>)}
+          </select>
         </div>
-        {pickSide('dst', dstRemote, setDstRemote, dstPath)}
+        <div className="field">
+          <label>目标网盘</label>
+          <select className="select" value={dstRemote} onChange={(e) => changeRemote('dst', e.target.value)}>
+            <option value="">请选择网盘…</option>
+            {remotes.map((r) => <option key={r.name} value={r.name}>{r.name}（{r.type}）</option>)}
+          </select>
+        </div>
+      </div>
+
+      <div className="field" style={{ marginBottom: 10 }}>
+        <label>文件夹映射 <span className="hint">（一个任务可以备多个文件夹：每组选一个源文件夹和它要去的目标文件夹）</span></label>
+        {pairs.map((x, i) => (
+          <div className="pair-map-row" key={i}>
+            <span className="pair-map-no">第 {i + 1} 组</span>
+            <button type="button" className="pair-map-cell" title="点这里选源文件夹"
+              onClick={() => setPicking({ idx: i, side: 'src' })}>
+              <span className="pair-map-tag">源</span>{pathLabel(x.src)}
+            </button>
+            <span className="pair-map-arrow">→</span>
+            <button type="button" className="pair-map-cell" title="点这里选目标文件夹"
+              onClick={() => setPicking({ idx: i, side: 'dst' })}>
+              <span className="pair-map-tag">目标</span>{pathLabel(x.dst)}
+            </button>
+            <button type="button" className="btn-link danger" disabled={pairs.length <= 1}
+              title={pairs.length <= 1 ? '至少保留一组' : '删掉这一组'}
+              onClick={() => { setPairs((prev) => prev.filter((_, j) => j !== i)); setPicking(null); }}>删除</button>
+          </div>
+        ))}
+        <button type="button" className="btn btn-ghost btn-sm" style={{ marginTop: 8 }}
+          onClick={() => setPairs((prev) => [...prev, { src: '', dst: '' }])}>
+          <Icon name="plus" size={14} /> 添加一组
+        </button>
       </div>
 
       {picking && (
         <div style={{ marginBottom: 16 }}>
-          <div className="field" style={{ marginBottom: 10 }}>
-            <label>{picking === 'src' ? '源' : '目标'}网盘</label>
-            <select className="select" value={picking === 'src' ? srcRemote : dstRemote}
-              onChange={(e) => { if (picking === 'src') { setSrcRemote(e.target.value); setSrcPath(''); } else { setDstRemote(e.target.value); setDstPath(''); } }}>
-              <option value="">请选择网盘…</option>
-              {remotes.map((r) => <option key={r.name} value={r.name}>{r.name}（{r.type}）</option>)}
-            </select>
+          <div style={{ fontSize: 13.5, fontWeight: 600, marginBottom: 8 }}>
+            第 {picking.idx + 1} 组 · 选择{picking.side === 'src' ? '源' : '目标'}文件夹
+            <span style={{ color: 'var(--text-3)', fontWeight: 400 }}>（网盘：{pickRemote || '未选择'}）</span>
           </div>
-          <FolderPicker
-            remote={picking === 'src' ? srcRemote : dstRemote}
-            remoteType={(remotes.find((r) => r.name === (picking === 'src' ? srcRemote : dstRemote)) || {}).type}
-            value={picking === 'src' ? srcPath : dstPath}
-            onChange={(p) => { if (picking === 'src') setSrcPath(p); else setDstPath(p); }}
-          />
+          {pickRemote ? (
+            <FolderPicker
+              remote={pickRemote}
+              remoteType={pickRemoteType}
+              value={pairs[picking.idx][picking.side]}
+              onChange={(p) => setPairPath(picking.idx, picking.side, p)}
+            />
+          ) : (
+            <div className="login-err">请先在上面选好{picking.side === 'src' ? '源' : '目标'}网盘</div>
+          )}
           <div style={{ textAlign: 'right', marginTop: 10 }}>
-            <button className="btn btn-primary btn-sm" onClick={() => setPicking('')}>就选这个文件夹</button>
+            <button className="btn btn-primary btn-sm" onClick={() => setPicking(null)}>就选这个文件夹</button>
           </div>
         </div>
       )}
@@ -179,7 +209,6 @@ function TaskForm({ remotes, initial, onDone, toast }) {
       <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 10, marginTop: 18 }}>
         <button className="btn btn-primary" disabled={saving} onClick={save}>{saving ? '保存中…' : '保存任务'}</button>
       </div>
-      <span style={{ display: 'none' }}>{srcR?.name}{dstR?.name}</span>
     </div>
   );
 }
@@ -242,7 +271,8 @@ export default function Tasks({ toast }) {
             <div className="row-main">
               <div style={{ fontWeight: 700, fontSize: 15 }}>{t.name}</div>
               <div style={{ color: 'var(--text-2)', fontSize: 13 }}>
-                从 <b>{t.srcRemote}</b>{t.srcPath ? '/' + t.srcPath : ''} → 到 <b>{t.dstRemote}</b>{t.dstPath ? '/' + t.dstPath : ''}
+                从 <b>{t.srcRemote}</b>{(t.pairs?.[0]?.src ?? t.srcPath) ? '/' + (t.pairs?.[0]?.src ?? t.srcPath) : ''} → 到 <b>{t.dstRemote}</b>{(t.pairs?.[0]?.dst ?? t.dstPath) ? '/' + (t.pairs?.[0]?.dst ?? t.dstPath) : ''}
+                {t.pairs && t.pairs.length > 1 && <> · <span style={{ color: 'var(--indigo-600)', fontWeight: 600 }}>共 {t.pairs.length} 组文件夹</span></>}
               </div>
               <div style={{ color: 'var(--text-3)', fontSize: 12.5 }}>
                 {scheduleText(t.schedule)}
