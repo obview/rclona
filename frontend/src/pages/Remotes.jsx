@@ -263,7 +263,13 @@ function ProviderForm({ providers, onDone, toast, editing }) {
   );
 }
 
-export default function Remotes({ toast, nav }) {
+export default function Remotes({ toast, nav, gotoDetail, openAddSignal, onConsumeAddSignal }) {
+  // #32：侧栏「添加网盘」带来的信号——落到本页就打开添加表单，随即回调消费掉，
+  // 之后切去别的页再回来、或刷新，都不会重复弹
+  useEffect(() => {
+    if (openAddSignal) { setAdding(true); onConsumeAddSignal?.(); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openAddSignal]);
   const [remotes, setRemotes] = useState(null);
   const [providers, setProviders] = useState(null);
   const [adding, setAdding] = useState(false);
@@ -326,7 +332,8 @@ export default function Remotes({ toast, nav }) {
         {(remotes || []).map((r) => (
           <div className="task-row" key={r.name} style={r.paused ? { opacity: 0.82 } : undefined}>
             <BrandBadge remote={r} size={46} />
-            <div className="row-main">
+            <div className="row-main" onClick={() => gotoDetail?.(r.name)} style={{ cursor: 'pointer' }}
+              title="点开看这个网盘的详情（状态、容量、同步关系、最近记录）">
               <div style={{ fontWeight: 700, fontSize: 15 }}>{r.name}</div>
               <div style={{ color: 'var(--text-3)', fontSize: 12.5 }}>
                 类型：{typeLabel(r.type)}
@@ -353,6 +360,9 @@ export default function Remotes({ toast, nav }) {
               {!r.paused && r.health?.status === 'down' && <span className="pill pill-fail">✕ 连接失效</span>}
               {!r.paused && r.health?.status === 'retrying' && <span className="pill pill-run">连接异常</span>}
               {!r.paused && r.health?.status === 'ok' && <span className="pill pill-ok">✓ 连接正常</span>}
+              <button className="btn btn-ghost btn-sm" onClick={() => gotoDetail?.(r.name)}>
+                <Icon name="drive" size={13} /> 详情
+              </button>
               <button className="btn btn-ghost btn-sm" disabled={testing === r.name} onClick={() => test(r)}>
                 <Icon name="refresh" size={13} /> {testing === r.name ? '测试中…' : '测试连接'}
               </button>

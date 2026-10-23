@@ -6,6 +6,7 @@ import Overview from './pages/Overview.jsx';
 import Tasks from './pages/Tasks.jsx';
 import Runs from './pages/Runs.jsx';
 import Remotes from './pages/Remotes.jsx';
+import RemoteDetail from './pages/RemoteDetail.jsx';
 import Settings from './pages/Settings.jsx';
 import Profile from './pages/Profile.jsx';
 
@@ -15,8 +16,8 @@ const NAV = [
   { key: 'runs', label: '运行记录', icon: 'history' },
   { key: 'remotes', label: '网盘管理', icon: 'drive' }
 ];
-const PAGE_KEYS = [...NAV.map((n) => n.key), 'settings', 'profile'];
-const TITLES = { overview: '概览', tasks: '备份任务', runs: '运行记录', remotes: '网盘管理', settings: '设置', profile: '个人资料' };
+const PAGE_KEYS = [...NAV.map((n) => n.key), 'settings', 'profile', 'remoteDetail'];
+const TITLES = { overview: '概览', tasks: '备份任务', runs: '运行记录', remotes: '网盘管理', settings: '设置', profile: '个人资料', remoteDetail: '网盘详情' };
 
 function routeFromHash() {
   const h = location.hash.replace(/^#\/?/, '').split('?')[0];
@@ -53,6 +54,8 @@ export default function App() {
   const [runToasts, setRunToasts] = useState([]); // #10 任务完成通知条
   const [focusRun, setFocusRun] = useState({ id: DEEP_FOCUS, n: DEEP_FOCUS ? 1 : 0 });
   const [navOpen, setNavOpen] = useState(false); // #11 手机抽屉侧栏开关
+  const [detailRemote, setDetailRemote] = useState(''); // #31 当前查看详情的网盘名
+  const [addRemoteSignal, setAddRemoteSignal] = useState(0); // #32 侧栏「添加网盘」直达表单的信号（计数器，每点一次 +1）
   const [userMenuOpen, setUserMenuOpen] = useState(false); // #23 侧栏底部头像菜单
   const userMenuRef = useRef(null);
   const runStatusRef = useRef(null); // 运行记录 id -> 上次见到的状态（null=还没初始化）
@@ -70,6 +73,16 @@ export default function App() {
   function gotoRun(runId) {
     setFocusRun((f) => ({ id: runId, n: f.n + 1 }));
     nav('runs');
+  }
+  // #31：进网盘详情页（侧栏网盘行、网盘管理页都走这里）
+  function gotoRemoteDetail(name) {
+    setDetailRemote(name);
+    nav('remoteDetail');
+  }
+  // #32：侧栏「添加网盘」——去网盘页并让它自动打开添加表单（信号被 Remotes 消费，刷新不会重弹）
+  function gotoAddRemote() {
+    setAddRemoteSignal((n) => n + 1);
+    nav('remotes');
   }
   async function checkMe() {
     try { setMe(await api.get('/auth/me')); }
@@ -167,15 +180,15 @@ export default function App() {
         <div className="side-section">我的网盘</div>
         <div className="side-drives">
           {drives.map((d) => (
-            <button className="drive-row" key={d.name} onClick={() => nav('remotes')}
-              title={d.paused ? `${d.name}（已暂停）` : d.name}>
+            <button className="drive-row" key={d.name} onClick={() => gotoRemoteDetail(d.name)}
+              title={d.paused ? `${d.name}（已暂停）· 点开看详情` : `${d.name} · 点开看详情`}>
               <BrandBadge remote={d} size={19} />
               <span className="dname">{d.name}</span>
               <span className="badge-num">{d.paused ? '已暂停' : d.type}</span>
               <span className={`status-dot ${driveDotClass(d)}`} />
             </button>
           ))}
-          <button className="drive-row" onClick={() => nav('remotes')}>
+          <button className="drive-row" onClick={gotoAddRemote}>
             <Icon name="plus" size={14} /><span className="dname">添加网盘</span>
           </button>
         </div>
@@ -216,7 +229,8 @@ export default function App() {
           {page === 'overview' && <Overview nav={nav} gotoRun={gotoRun} />}
           {page === 'tasks' && <Tasks toast={toast} />}
           {page === 'runs' && <Runs key={focusRun.n} focusRunId={focusRun.id} />}
-          {page === 'remotes' && <Remotes toast={toast} nav={nav} />}
+          {page === 'remotes' && <Remotes toast={toast} nav={nav} gotoDetail={gotoRemoteDetail} openAddSignal={addRemoteSignal} onConsumeAddSignal={() => setAddRemoteSignal(0)} />}
+          {page === 'remoteDetail' && <RemoteDetail key={detailRemote} name={detailRemote} nav={nav} toast={toast} />}
           {page === 'settings' && <Settings toast={toast} />}
           {page === 'profile' && <Profile me={me} toast={toast} />}
         </div>
