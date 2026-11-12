@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
 import { FolderPicker, Icon, Modal, HelpTip } from '../components.jsx';
-import { fmtAgo, fmtTime, scheduleText, WEEKDAYS } from '../util.js';
+import { fmtAgo, fmtBytes, fmtTime, scheduleText, WEEKDAYS } from '../util.js';
 
 const FILTER_ACTIONS = [
   { value: 'exclude', label: '排除' },
@@ -16,13 +16,19 @@ const FILTER_MATCHES = [
   { value: 'contains', label: '名字包含' },
   { value: 'exact', label: '名字等于' },
   { value: 'ext', label: '扩展名' },
-  { value: 'glob', label: '通配符' }
+  { value: 'glob', label: '通配符' },
+  { value: 'path', label: '指定路径' }
 ];
 const FILTER_LABEL = (list, value) => list.find((x) => x.value === value)?.label || value;
 
 export function filterPreview(f) {
   const raw = String(f?.value || '').trim();
   const shown = f?.match === 'ext' ? `.${raw.replace(/^\.+/, '')}` : (raw || '（未填写）');
+  if (f?.match === 'path') {
+    const only = f?.action === 'include' ? '（只同步这个位置）' : '（只排除这个位置）';
+    const what = f?.target === 'file' ? '文件路径' : f?.target === 'folder' ? '文件夹路径' : '路径';
+    return `${FILTER_LABEL(FILTER_ACTIONS, f?.action)} · ${FILTER_LABEL(FILTER_TARGETS, f?.target)} · ${what} ${shown}${only}`;
+  }
   const matchText = f?.match === 'contains' ? `名字包含 ${shown}`
     : f?.match === 'exact' ? `名字等于 ${shown}`
     : f?.match === 'ext' ? `扩展名 ${shown}`
@@ -31,6 +37,7 @@ export function filterPreview(f) {
 }
 
 function filterPlaceholder(f) {
+  if (f.match === 'path') return f.target === 'file' ? '点「选择文件」选一个具体文件' : '点「选择文件夹」选一个子文件夹';
   if (f.match === 'ext') return '例如 zip 或 .zip';
   if (f.match === 'glob') return '例如 docs/*.txt 或 cache-*';
   if (f.match === 'exact') return '例如 report';
@@ -45,6 +52,75 @@ const cleanPairFilters = (filters) => (Array.isArray(filters)
     value: f?.value || ''
   }))
   : []);
+
+// 指定文件路径规则用的文件选择器：仿 Remotes.jsx 的 FileBrowser（/api/files 返回 dirs + files），
+// 在源文件夹里逐级点进去、点选一个具体文件；只选不下载。
+function FilePicker({ remote, remoteType, dir, selected, onSelect }) {
+  const root = remoteType === 'local' ? '/' : '';
+  const [path, setPath] = useState(dir || root);
+  const [dirs, setDirs] = useState([]);
+  const [files, setFiles] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState('');
+
+  async function load(p) {
+    if (!remote) return;
+    setLoading(true); setErr('');
+    try {
+      const d = await api.get(`/files?remote=${encodeURIComponent(remote)}&path=${encodeURIComponent(p)}`);
+      setDirs(d.dirs || []); setFiles(d.files || []); setPath(p);
+    } catch (e) { setErr(e.message); setDirs([]); setFiles([]); }
+    setLoading(false);
+  }
+  useEffect(() => { if (remote) load(dir || root); /* eslint-disable-next-line */ }, [remote]);
+
+  if (!remote) return <div className="info-box">先在上方选择网盘，这里就能浏览并选择文件。</div>;
+  const segments = path.split('/').filter(Boolean);
+  const isAbs = path.startsWith('/');
+  const joinSegs = (n) => (isAbs ? '/' : '') + segments.slice(0, n).join('/');
+  const parentPath = segments.length <= 1 ? root : joinSegs(segments.length - 1);
+  const selName = selected ? selected.split('/').filter(Boolean).pop() : '';
+  return (
+    <div>
+      <div className="crumb-nav">
+        <button onClick={() => load(root)}>{remote} 根目录</button>
+        {segments.map((c, i) => (
+          <span key={i}>/ <button onClick={() => load(joinSegs(i + 1))}>{c}</button></span>
+        ))}
+        <span style={{ marginLeft: 'auto', color: 'var(--text-3)' }}>已选：{selName || '（还没选文件）'}</span>
+      </div>
+      {err && (
+        <div className="login-err">
+          {err}{' '}
+          <button className="btn-link" onClick={() => load(path)}>重试</button>
+        </div>
+      )}
+      <div className="folder-list">
+        {path !== root && (
+          <div className="folder-item" onClick={() => load(parentPath)}>
+            <Icon name="up" size={15} /> 返回上一级
+          </div>
+        )}
+        {loading && <div className="folder-item" style={{ color: 'var(--text-3)' }}>加载中…</div>}
+        {!loading && !err && dirs.length === 0 && files.length === 0 && <div className="folder-item" style={{ color: 'var(--text-3)' }}>（这个文件夹是空的）</div>}
+        {!loading && dirs.map((d) => (
+          <div className="folder-item" key={d.path} onClick={() => load(d.path)}>
+            <span style={{ color: '#e8a13a' }}><Icon name="folder" size={16} /></span>{d.name}
+            <span style={{ marginLeft: 'auto', color: 'var(--text-3)', fontSize: 12 }}>文件夹（点进去看）</span>
+          </div>
+        ))}
+        {!loading && files.map((f) => (
+          <div className={`folder-item${selected === f.path ? ' sel' : ''}`} key={f.path} onClick={() => onSelect(f.path)}>
+            <span style={{ color: 'var(--text-3)' }}><Icon name="drive" size={15} /></span>
+            <span style={{ wordBreak: 'break-all' }}>{f.name}</span>
+            <span style={{ marginLeft: 'auto', color: 'var(--text-3)', fontSize: 12, whiteSpace: 'nowrap' }}>{f.size != null ? fmtBytes(f.size) : ''}</span>
+            {selected === f.path && <span style={{ color: 'var(--indigo-600)', fontSize: 12, whiteSpace: 'nowrap' }}>✓ 已选</span>}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 function TaskForm({ remotes, initial, onDone, toast }) {
   const [name, setName] = useState(initial?.name || '');
@@ -61,6 +137,65 @@ function TaskForm({ remotes, initial, onDone, toast }) {
     return [{ src: initial?.srcPath || '', dst: initial?.dstPath || '', filters: [], filtersOpen: false }];
   });
   const [picking, setPicking] = useState(null); // { idx, side: 'src' | 'dst' }
+  // 指定路径规则用的内嵌选择器：正在给哪条规则选、当前选中的绝对路径、文件选择器打开的目录
+  const [pathPicking, setPathPicking] = useState(null); // { pairIdx, filterIdx }
+  const [pathPickVal, setPathPickVal] = useState('');
+  const [pathPickDir, setPathPickDir] = useState('');
+  const srcRemoteType = (remotes.find((r) => r.name === srcRemote) || {}).type;
+  const srcIsLocal = srcRemoteType === 'local';
+  // 源文件夹 + 相对路径 → 选择器要用的绝对路径（本地网盘以 / 开头；源为空即根目录）
+  function joinSrcRel(src, rel) {
+    if (!rel) return src;
+    if (!src) return srcIsLocal ? `/${rel}` : rel;
+    return `${src.replace(/\/+$/, '')}/${rel}`;
+  }
+  // 选择器确认时：绝对路径换算回相对源文件夹的相对路径
+  function relFromAbs(src, abs) {
+    const norm = (p) => (p || '').replace(/\/+$/, '') || (srcIsLocal ? '/' : '');
+    const s = norm(src);
+    const p = norm(abs);
+    if (p === s) return { error: 'root' };
+    if (s === '/' || s === '') {
+      const r = p.replace(/^\/+/, '');
+      return r ? { rel: r } : { error: 'root' };
+    }
+    if (p.startsWith(`${s}/`)) return { rel: p.slice(s.length + 1) };
+    return { error: 'outside' };
+  }
+  function parentDir(p) {
+    const q = (p || '').replace(/\/+$/, '');
+    const idx = q.lastIndexOf('/');
+    if (idx <= 0) return srcIsLocal ? '/' : '';
+    return q.slice(0, idx);
+  }
+  function openPathPicker(pairIdx, filterIdx) {
+    const pair = pairs[pairIdx];
+    const f = pair?.filters?.[filterIdx];
+    const src = pair?.src || '';
+    if (f?.target === 'file' && f.value) {
+      // 已选过文件：打开它所在的目录、并把那个文件标为已选
+      const abs = joinSrcRel(src, f.value);
+      setPathPickVal(abs);
+      setPathPickDir(parentDir(abs));
+    } else {
+      setPathPickVal(f?.target === 'file' ? '' : joinSrcRel(src, f?.value || ''));
+      setPathPickDir(joinSrcRel(src, ''));
+    }
+    setPathPicking({ pairIdx, filterIdx });
+  }
+  function confirmPathPick() {
+    if (!pathPicking) return;
+    const { pairIdx, filterIdx } = pathPicking;
+    const f = pairs[pairIdx]?.filters?.[filterIdx];
+    const isFile = f?.target === 'file';
+    if (isFile && !String(pathPickVal || '').trim()) { setErr('请先点选一个要排除的文件'); return; }
+    const r = relFromAbs(pairs[pairIdx]?.src || '', pathPickVal);
+    if (r.error === 'root') { setErr(isFile ? '请先点选源文件夹里面的一个文件' : '不能排除源文件夹本身，选它里面的子文件夹'); return; }
+    if (r.error === 'outside') { setErr(isFile ? '只能选源文件夹里面的文件' : '只能选源文件夹里面的子文件夹'); return; }
+    setErr('');
+    updateFilter(pairIdx, filterIdx, { value: r.rel });
+    setPathPicking(null);
+  }
   const s0 = initial?.schedule || {};
   const [schedType, setSchedType] = useState(s0.type || 'daily');
   const [time, setTime] = useState(s0.time || '03:30');
@@ -103,12 +238,14 @@ function TaskForm({ remotes, initial, onDone, toast }) {
   }
   function removeFilter(idx, filterIdx) {
     updatePairFilters(idx, (filters) => filters.filter((_, j) => j !== filterIdx));
+    setPathPicking(null);
   }
   function changeRemote(side, value) {
     // 换了网盘，原来在旧网盘里选的文件夹路径就不作数了，清掉这一侧全部组的选择
     if (side === 'src') { setSrcRemote(value); setPairs((prev) => prev.map((x) => ({ ...x, src: '' }))); }
     else { setDstRemote(value); setPairs((prev) => prev.map((x) => ({ ...x, dst: '' }))); }
     if (picking && picking.side === side) setPicking(null);
+    setPathPicking(null);
   }
 
   async function save() {
@@ -121,6 +258,19 @@ function TaskForm({ remotes, initial, onDone, toast }) {
       const filters = pairs[i].filters || [];
       for (let j = 0; j < filters.length; j++) {
         const f = filters[j];
+        if (f.match === 'path') {
+          const v = String(f.value || '').trim();
+          if (!v) {
+            setErr(`第 ${i + 1} 组第 ${j + 1} 条筛选的内容不能为空，请点「${f.target === 'file' ? '选择文件' : '选择文件夹'}」选一个${f.target === 'file' ? '文件' : '子文件夹'}`);
+            return;
+          }
+          if (v.startsWith('/') || v.endsWith('/') || v.split('/').some((s) => s === '..' || s === '')
+            || /[*?[\]{}\\]/.test(v)) {
+            setErr(`第 ${i + 1} 组第 ${j + 1} 条筛选的路径格式不对：填源文件夹下的相对路径，如 moviepilot/core，不要以 / 开头或结尾、不要含 ..、不要带通配符或反斜杠`);
+            return;
+          }
+          continue;
+        }
         if (!String(f.value || '').trim()) { setErr(`第 ${i + 1} 组第 ${j + 1} 条筛选的内容不能为空`); return; }
         if (f.match === 'ext') {
           const ext = String(f.value).trim().replace(/^\.+/, '');
@@ -220,19 +370,72 @@ function TaskForm({ remotes, initial, onDone, toast }) {
                       onChange={(e) => updateFilter(i, fi, { action: e.target.value })}>
                       {FILTER_ACTIONS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                     </select>
-                    <select className="select" aria-label="筛选对象" value={f.target}
-                      onChange={(e) => updateFilter(i, fi, { target: e.target.value })}>
-                      {FILTER_TARGETS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    <select className="select" aria-label="筛选对象"
+                      value={f.match === 'path' && f.target !== 'folder' && f.target !== 'file' ? 'folder' : f.target}
+                      title={f.match === 'path' ? '指定路径只分文件夹和文件两种' : undefined}
+                      onChange={(e) => {
+                        if (f.match === 'path' && e.target.value !== f.target) {
+                          // 文件夹/文件切换时清空已选路径，避免文件夹路径被当成文件路径
+                          if (pathPicking && pathPicking.pairIdx === i && pathPicking.filterIdx === fi) setPathPicking(null);
+                          updateFilter(i, fi, { target: e.target.value, value: '' });
+                        } else updateFilter(i, fi, { target: e.target.value });
+                      }}>
+                      {(f.match === 'path' ? FILTER_TARGETS.filter((o) => o.value !== 'any') : FILTER_TARGETS)
+                        .map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                     </select>
                     <select className="select" aria-label="匹配方式" value={f.match}
-                      onChange={(e) => updateFilter(i, fi, { match: e.target.value })}>
+                      onChange={(e) => updateFilter(i, fi, e.target.value === 'path'
+                        ? { match: 'path', target: 'folder' } : { match: e.target.value })}>
                       {FILTER_MATCHES.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
                     </select>
-                    <input className="input" aria-label="筛选内容" value={f.value}
-                      placeholder={filterPlaceholder(f)}
-                      onChange={(e) => updateFilter(i, fi, { value: e.target.value })} />
+                    {f.match === 'path' ? (
+                      <div className="filter-path-box">
+                        <input className="input" aria-label="筛选内容" readOnly
+                          value={f.value ? `/${f.value}` : ''} placeholder={filterPlaceholder(f)} />
+                        <button type="button" className="btn btn-ghost btn-sm" disabled={!srcRemote}
+                          title={srcRemote ? (f.target === 'file' ? '在源文件夹里浏览并点选要排除的具体文件' : '在源文件夹里浏览并点选要排除的子文件夹') : '请先选源网盘'}
+                          onClick={() => openPathPicker(i, fi)}>{f.target === 'file' ? '选择文件' : '选择文件夹'}</button>
+                        {f.value && (
+                          <button type="button" className="btn-link" onClick={() => {
+                            updateFilter(i, fi, { value: '' });
+                            if (pathPicking && pathPicking.pairIdx === i && pathPicking.filterIdx === fi) setPathPicking(null);
+                          }}>清除</button>
+                        )}
+                      </div>
+                    ) : (
+                      <input className="input" aria-label="筛选内容" value={f.value}
+                        placeholder={filterPlaceholder(f)}
+                        onChange={(e) => updateFilter(i, fi, { value: e.target.value })} />
+                    )}
                     <button type="button" className="btn-link danger" onClick={() => removeFilter(i, fi)}>删除规则</button>
                     <div className="filter-rule-preview">{filterPreview(f)}</div>
+                    {f.match === 'path' && !srcRemote && (
+                      <div className="filter-path-hint">请先在上面选源网盘，再点「{f.target === 'file' ? '选择文件' : '选择文件夹'}」</div>
+                    )}
+                    {pathPicking && pathPicking.pairIdx === i && pathPicking.filterIdx === fi && (
+                      <div className="filter-path-picker">
+                        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
+                          {f.target === 'file' ? '选择要排除的文件' : '选择要排除的子文件夹'}
+                          <span style={{ color: 'var(--text-3)', fontWeight: 400 }}>
+                            （源：{srcRemote}{x.src ? `/${x.src}` : '/（根目录）'}）
+                          </span>
+                        </div>
+                        {f.target === 'file' ? (
+                          <FilePicker key={`${i}-${fi}`} remote={srcRemote} remoteType={srcRemoteType}
+                            dir={pathPickDir} selected={pathPickVal} onSelect={(p) => setPathPickVal(p)} />
+                        ) : (
+                          <FolderPicker key={`${i}-${fi}`} remote={srcRemote} remoteType={srcRemoteType}
+                            value={pathPickVal} onChange={(p) => setPathPickVal(p)} />
+                        )}
+                        <div style={{ textAlign: 'right', marginTop: 10 }}>
+                          <button type="button" className="btn-link" style={{ marginRight: 12 }}
+                            onClick={() => setPathPicking(null)}>取消</button>
+                          <button type="button" className="btn btn-primary btn-sm" onClick={confirmPathPick}>
+                            {f.target === 'file' ? '就选这个文件' : '就选这个文件夹'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
                   </div>
                 ))}
                 <button type="button" className="btn btn-ghost btn-sm" onClick={() => addFilter(i)}>

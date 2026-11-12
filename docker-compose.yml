@@ -10,6 +10,8 @@ services:
       PANEL_USER: "${PANEL_USER:-admin}"
       PANEL_PASSWORD: "${PANEL_PASSWORD:-}"
       TZ: "${TZ:-Asia/Shanghai}"
+      # Telegram 通知代理（只给 Telegram 通知用，网盘备份不走它；留空 = 直连）
+      TELEGRAM_PROXY: "${TELEGRAM_PROXY:-}"
     volumes:
       # 全部数据（网盘配置、任务、记录、设置）都在这一个卷里
       - rclona-data:/data

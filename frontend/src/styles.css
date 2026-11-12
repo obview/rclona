@@ -263,6 +263,15 @@ input, select, textarea { font-family: inherit; font-size: 14px; color: var(--te
   gap: 8px; align-items: center; margin-bottom: 10px;
 }
 .filter-rule-preview { grid-column: 1 / -1; color: var(--text-2); font-size: 12.5px; }
+/* 指定文件夹路径规则：只读路径框 + 选择/清除按钮 + 内嵌文件夹选择器 */
+.filter-path-box { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; min-width: 0; }
+.filter-path-box .input { flex: 1; min-width: 120px; background: #f7f8fd; cursor: default; }
+.filter-path-hint { grid-column: 1 / -1; color: var(--text-3); font-size: 12.5px; }
+.filter-path-picker {
+  grid-column: 1 / -1; margin-top: 2px; padding: 11px; border: 1px solid var(--border);
+  border-radius: 10px; background: #fbfcff;
+}
+.filter-path-picker .folder-list { background: #fff; }
 .switch { position: relative; width: 42px; height: 24px; flex: 0 0 auto; display: inline-block; }
 .switch input { opacity: 0; width: 0; height: 0; }
 .switch .track { position: absolute; inset: 0; border-radius: 999px; background: #ccd1e4; transition: .2s; cursor: pointer; }
@@ -294,6 +303,7 @@ input, select, textarea { font-family: inherit; font-size: 14px; color: var(--te
 .folder-list { border: 1.5px solid var(--border); border-radius: 10px; max-height: 300px; overflow: auto; }
 .folder-item { display: flex; align-items: center; gap: 9px; padding: 9px 13px; cursor: pointer; border-bottom: 1px solid #f2f4fb; font-size: 13.5px; }
 .folder-item:hover { background: var(--indigo-50); }
+.folder-item.sel { background: var(--indigo-50); }
 .folder-item:last-child { border-bottom: none; }
 .crumb-nav { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; font-size: 13px; color: var(--text-2); margin-bottom: 9px; }
 .crumb-nav button { background: none; border: none; color: var(--indigo-600); padding: 2px 4px; font-size: 13px; }
@@ -481,6 +491,7 @@ input, select, textarea { font-family: inherit; font-size: 14px; color: var(--te
   .pair-filter-bar, .pair-filter-editor { margin-left: 0; }
   .filter-rule-row { grid-template-columns: 1fr 1fr; }
   .filter-rule-row .input { grid-column: 1 / -1; }
+  .filter-rule-row .filter-path-box { grid-column: 1 / -1; }
   .filter-rule-row .btn-link { justify-self: end; }
   .dash-grid { grid-template-columns: 1fr; }
   .sys-grid { grid-template-columns: 1fr; }

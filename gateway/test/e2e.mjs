@@ -1024,6 +1024,78 @@ async function main() {
     ok(!fs.existsSync(path.join(fltDst3, 'named-folder', 'report', 'inside.txt')),
       '名为 report 的文件夹内容没有被文件规则误放行');
 
+    // 19c-路径：指定文件夹路径只生成锚定规则，不补 **/ 变体、不补 - ** 兜底
+    const pathFolderRules = pairFilterRules([
+      { action: 'exclude', target: 'folder', match: 'path', value: 'data/cache' }
+    ]);
+    ok(JSON.stringify(pathFolderRules) === JSON.stringify(['- /data/cache/', '- /data/cache/**']),
+      '翻译：排除指定文件夹路径 data/cache 只生成两条锚定规则', pathFolderRules.join(' | '));
+    const pathFileRules = pairFilterRules([
+      { action: 'exclude', target: 'file', match: 'path', value: 'data/secret.txt' }
+    ]);
+    ok(JSON.stringify(pathFileRules) === JSON.stringify(['- /data/secret.txt']),
+      '翻译：排除指定文件路径只生成一条锚定规则', pathFileRules.join(' | '));
+    const pathAnyRules = pairFilterRules([
+      { action: 'exclude', target: 'any', match: 'path', value: 'x' }
+    ]);
+    ok(JSON.stringify(pathAnyRules) === JSON.stringify(['- /x/', '- /x/**', '- /x'])
+      && !pathAnyRules.some((r) => r.includes('**/')),
+      '翻译：不限对象时文件夹两条加文件一条，且不含 **/ 变体', pathAnyRules.join(' | '));
+
+    // 19c-路径校验：../ 与空值被拒绝（中文提示）
+    const badPathTask = await api('POST', '/api/tasks', {
+      name: '坏路径筛选', srcRemote: 'tsrc', dstRemote: 'tdst',
+      pairs: [{ src: fltSrc, dst: path.join(T, 'filterbak', 'bad-path'), filters: [{ action: 'exclude', target: 'folder', match: 'path', value: '../cache' }] }],
+      schedule: { type: 'daily', time: '04:00' }
+    });
+    ok(badPathTask.status !== 200 && /路径格式不对/.test(badPathTask.data?.error || ''),
+      '含 .. 的指定路径被拒绝（中文提示）', badPathTask.data?.error || '');
+    const emptyPathTask = await api('POST', '/api/tasks', {
+      name: '空路径筛选', srcRemote: 'tsrc', dstRemote: 'tdst',
+      pairs: [{ src: fltSrc, dst: path.join(T, 'filterbak', 'empty-path'), filters: [{ action: 'exclude', target: 'folder', match: 'path', value: '' }] }],
+      schedule: { type: 'daily', time: '04:00' }
+    });
+    ok(emptyPathTask.status !== 200 && /不能为空/.test(emptyPathTask.data?.error || ''),
+      '空的指定路径被拒绝（中文提示）', emptyPathTask.data?.error || '');
+
+    // 19c-路径真跑：同名 cache 文件夹只排 data 下的那一个，other 下的照常同步
+    const pathSrc = path.join(T, 'filterpath', 'data');
+    const mkPathFile = (rel, text) => {
+      const p = path.join(pathSrc, rel);
+      fs.mkdirSync(path.dirname(p), { recursive: true });
+      fs.writeFileSync(p, text);
+    };
+    mkPathFile('data/cache/secret.txt', 'excluded cache secret');
+    mkPathFile('data/keep.txt', 'data keep');
+    mkPathFile('other/cache/keep.txt', 'other cache keep');
+    mkPathFile('top.txt', 'top file');
+    const fltDst4 = path.join(T, 'filterbak', 'exclude-path');
+    const fltRun5 = await runFilterTask('筛选-排除指定路径', [
+      { action: 'exclude', target: 'folder', match: 'path', value: 'data/cache' }
+    ], fltDst4, pathSrc);
+    ok(fltRun5.status === 'success', '排除指定路径的任务运行成功', `状态=${fltRun5.status} ${fltRun5.reasonZh || ''}`);
+    ok(!fs.existsSync(path.join(fltDst4, 'data', 'cache')),
+      '指定的 data/cache 文件夹没有同步过去');
+    ok(fs.readFileSync(path.join(fltDst4, 'other', 'cache', 'keep.txt'), 'utf8') === 'other cache keep'
+      && fs.readFileSync(path.join(fltDst4, 'data', 'keep.txt'), 'utf8') === 'data keep'
+      && fs.readFileSync(path.join(fltDst4, 'top.txt'), 'utf8') === 'top file',
+      '同名 other/cache 正常同步，其余文件也正常');
+
+    // 19c-路径真跑（文件）：排除 keep/notes.txt 这一个文件，同目录其它文件正常同步
+    mkPathFile('keep/notes.txt', 'excluded note');
+    mkPathFile('keep/other.txt', 'keep other');
+    const fltDst5 = path.join(T, 'filterbak', 'exclude-path-file');
+    const fltRun6 = await runFilterTask('筛选-排除指定文件', [
+      { action: 'exclude', target: 'file', match: 'path', value: 'keep/notes.txt' }
+    ], fltDst5, pathSrc);
+    ok(fltRun6.status === 'success', '排除指定文件的任务运行成功', `状态=${fltRun6.status} ${fltRun6.reasonZh || ''}`);
+    ok(!fs.existsSync(path.join(fltDst5, 'keep', 'notes.txt')),
+      '指定的 keep/notes.txt 文件没有同步过去');
+    ok(fs.readFileSync(path.join(fltDst5, 'keep', 'other.txt'), 'utf8') === 'keep other'
+      && fs.readFileSync(path.join(fltDst5, 'data', 'keep.txt'), 'utf8') === 'data keep'
+      && fs.readFileSync(path.join(fltDst5, 'top.txt'), 'utf8') === 'top file',
+      '同目录其它文件与源树其余文件都正常同步');
+
     // 19d 与 #18 共存：重新把占位 fixture 灌回 memory 网盘（第 17 节重启过网关，内存内容已清空），
     // 用户规则（排除文件 other.txt）与空占位自动跳过同时生效
     await rcdCall('sync/copy', { srcFs: stC, dstFs: 'tmem:appdata/legado' });

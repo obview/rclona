@@ -1,5 +1,7 @@
 import http from 'node:http';
 import https from 'node:https';
+import net from 'node:net';
+import tls from 'node:tls';
 import { store } from './store.js';
 import { cfg } from './config.js';
 import { scheduleText } from './schedule.js';
@@ -13,11 +15,69 @@ export function telegramReady() {
   return !!(t.enabled && t.botToken && t.chatId);
 }
 
+// Telegram 代理：只给 Telegram 通知用（环境变量 TELEGRAM_PROXY，如 http://172.28.0.1:7890）。
+// Node 的 http/https 模块不认 HTTP(S)_PROXY，所以这里不用全局代理变量；rclone 走自己的
+// 网络（网盘流量），也与本代理无关。没设 TELEGRAM_PROXY 时保持原来的直连。
+function telegramProxy() {
+  const raw = String(process.env.TELEGRAM_PROXY || '').trim();
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'http:' || !u.hostname) return null;
+    return { host: u.hostname, port: Number(u.port || 8080) };
+  } catch { return null; }
+}
+
+// 经 HTTP 代理发 CONNECT 隧道，再在隧道里做 TLS：
+// 代理只负责把 TCP 流送到 api.telegram.org:443，TLS 仍由本机与 Telegram 直接协商，
+// 代理看不到令牌和消息内容。返回已完成 TLS 握手的 socket。
+async function connectViaProxy(proxy, targetHost, targetPort, timeoutMs) {
+  const sock = net.connect({ host: proxy.host, port: proxy.port, family: 4 });
+  try {
+    await new Promise((resolve, reject) => {
+      const to = setTimeout(() => { sock.destroy(); reject(new Error('连接代理超时')); }, timeoutMs);
+      sock.once('connect', () => { clearTimeout(to); resolve(); });
+      sock.once('error', (e) => { clearTimeout(to); reject(e); });
+    });
+    sock.write(`CONNECT ${targetHost}:${targetPort} HTTP/1.1\r\nHost: ${targetHost}:${targetPort}\r\n\r\n`);
+    const head = await new Promise((resolve, reject) => {
+      const to = setTimeout(() => { sock.destroy(); reject(new Error('代理 CONNECT 超时')); }, timeoutMs);
+      let buf = Buffer.alloc(0);
+      const onData = (c) => {
+        buf = Buffer.concat([buf, c]);
+        const i = buf.indexOf('\r\n\r\n');
+        if (i >= 0) {
+          clearTimeout(to);
+          sock.off('data', onData);
+          if (buf.length > i + 4) sock.unshift(buf.subarray(i + 4));
+          resolve(buf.subarray(0, i).toString('utf8'));
+        }
+      };
+      sock.on('data', onData);
+      sock.once('error', (e) => { clearTimeout(to); reject(e); });
+    });
+    const statusLine = (head.split('\r\n')[0] || '').trim();
+    if (!/^HTTP\/\d+(?:\.\d+)? 200\b/.test(statusLine)) throw new Error(`代理 CONNECT 失败（${statusLine || '无响应'}）`);
+    const tlsSock = tls.connect({ socket: sock, servername: targetHost });
+    await new Promise((resolve, reject) => {
+      const to = setTimeout(() => { tlsSock.destroy(); reject(new Error('TLS 握手超时')); }, timeoutMs);
+      tlsSock.once('secureConnect', () => { clearTimeout(to); resolve(); });
+      tlsSock.once('error', (e) => { clearTimeout(to); reject(e); });
+    });
+    return tlsSock;
+  } catch (e) {
+    try { sock.destroy(); } catch { /* 忽略 */ }
+    throw e;
+  }
+}
+
 // 发一个 JSON POST 并解析 JSON 响应。刻意不用全局 fetch：undici 在「容器没有 IPv6 路由、
 // DNS 却返回 AAAA 记录」的常见 Docker 网络里会扑向 IPv6 并长时间挂起直到超时
 // （2026-10-23 线上实测：api.telegram.org 的 fetch 挂死、同容器 rclone(Go) 与 IPv4 一切正常，
 // 只有走 Node fetch 的 Telegram 通知中招）。改用 http/https 模块并锁定 family:4（IPv4）。
 function postJson(urlStr, payload, timeoutMs = 15000) {
+  const proxy = telegramProxy();
+  if (proxy) return postJsonViaProxy(urlStr, payload, proxy, timeoutMs);
   return new Promise((resolve, reject) => {
     let url;
     try { url = new URL(urlStr); } catch { reject(new Error('通知接口地址不正确')); return; }
@@ -39,6 +99,59 @@ function postJson(urlStr, payload, timeoutMs = 15000) {
     req.setTimeout(timeoutMs, () => req.destroy(new Error('连接 Telegram 接口超时（服务器到 api.telegram.org 的网络不通）')));
     req.on('error', reject);
     req.end(body);
+  });
+}
+
+// 经 TELEGRAM_PROXY 发 JSON POST：先建 CONNECT 隧道 + TLS，再在这条已建好的加密连接上
+// 手写 HTTP 请求、解析响应（不走 https.request 的 createConnection——实测该选项在
+// Node 24 里会被默认 Agent 忽略、仍直连目标）。响应解析与直连路径共用同一套逻辑。
+function decodeChunked(buf) {
+  const out = [];
+  let pos = 0;
+  for (;;) {
+    const eol = buf.indexOf('\r\n', pos);
+    if (eol < 0) break;
+    const size = parseInt(buf.subarray(pos, eol).toString('utf8').trim(), 16);
+    if (!size) break;
+    out.push(buf.subarray(eol + 2, eol + 2 + size));
+    pos = eol + 2 + size + 2;
+  }
+  return Buffer.concat(out);
+}
+
+async function postJsonViaProxy(urlStr, payload, proxy, timeoutMs = 15000) {
+  let url;
+  try { url = new URL(urlStr); } catch { throw new Error('通知接口地址不正确'); }
+  if (url.protocol !== 'https:') throw new Error('代理只支持 https 的通知接口地址');
+  const body = JSON.stringify(payload);
+  const tlsSock = await connectViaProxy(proxy, url.hostname, Number(url.port || 443), timeoutMs);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { tlsSock.destroy(); reject(new Error('连接 Telegram 接口超时（服务器到 api.telegram.org 的网络不通）')); }, timeoutMs);
+    let buf = Buffer.alloc(0);
+    let settled = false;
+    const done = (fn, v) => { if (settled) return; settled = true; clearTimeout(timer); try { tlsSock.destroy(); } catch { /* 忽略 */ } fn(v); };
+    tlsSock.on('data', (c) => { buf = Buffer.concat([buf, c]); });
+    tlsSock.on('end', () => {
+      try {
+        const idx = buf.indexOf('\r\n\r\n');
+        if (idx < 0) return done(reject, new Error('Telegram 接口返回异常（无响应头）'));
+        const headerText = buf.subarray(0, idx).toString('utf8');
+        let respBody = buf.subarray(idx + 4);
+        const headers = {};
+        for (const line of headerText.split('\r\n').slice(1)) {
+          const i = line.indexOf(':');
+          if (i > 0) headers[line.slice(0, i).trim().toLowerCase()] = line.slice(i + 1).trim();
+        }
+        if ((headers['transfer-encoding'] || '').toLowerCase().includes('chunked')) respBody = decodeChunked(respBody);
+        const status = Number((headerText.split('\r\n')[0].match(/HTTP\/\d+(?:\.\d+)? (\d+)/) || [])[1] || 0);
+        let data = {};
+        try { data = JSON.parse(respBody.toString('utf8') || '{}'); } catch { /* 非 JSON 响应按空对象处理 */ }
+        done(resolve, { status, data });
+      } catch (e) { done(reject, e); }
+    });
+    tlsSock.on('error', (e) => done(reject, e));
+    const path = url.pathname + url.search;
+    tlsSock.write(`POST ${path} HTTP/1.1\r\nHost: ${url.hostname}\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\nConnection: close\r\n\r\n${body}`);
   });
 }
 

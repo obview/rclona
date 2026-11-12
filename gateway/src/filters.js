@@ -4,7 +4,7 @@
 
 const ACTIONS = new Set(['include', 'exclude']);
 const TARGETS = new Set(['file', 'folder', 'any']);
-const MATCHES = new Set(['contains', 'exact', 'ext', 'glob']);
+const MATCHES = new Set(['contains', 'exact', 'ext', 'glob', 'path']);
 
 export function escapeFilterLiteral(value) {
   return String(value).replace(/([\\*?\[\]{}])/g, '\\$1');
@@ -28,8 +28,25 @@ export function normalizePairFilters(rawFilters, pairIndex = 0) {
     if (!ACTIONS.has(action)) throw new Error(`${nth}的作用只能是「仅同步」或「排除」`);
     if (!TARGETS.has(target)) throw new Error(`${nth}的对象只能是文件、文件夹或不限`);
     if (!MATCHES.has(match)) throw new Error(`${nth}的匹配方式不对`);
-    if (!value) throw new Error(`${nth}的内容不能为空，请填写名字、扩展名或通配符`);
+    if (!value) {
+      if (match === 'path') {
+        throw new Error(target === 'file'
+          ? `${nth}的内容不能为空，请点「选择文件」选一个文件`
+          : `${nth}的内容不能为空，请点「选择文件夹」选一个子文件夹`);
+      }
+      throw new Error(`${nth}的内容不能为空，请填写名字、扩展名或通配符`);
+    }
     if (/[\r\n]/.test(value)) throw new Error(`${nth}的内容不能换行`);
+    if (match === 'path') {
+      // 指定文件夹路径：相对该组源文件夹根的路径，不许越出源根、不许带通配符；
+      // 允许 .git 这类点开头段、中文和空格。
+      const bad = value.startsWith('/') || value.endsWith('/')
+        || value.split('/').some((seg) => seg === '..' || seg === '')
+        || /[*?[\]{}\\]/.test(value);
+      if (bad) {
+        throw new Error(`${nth}的路径格式不对：填源文件夹下的相对路径，如 moviepilot/core，不要以 / 开头或结尾、不要含 ..、不要带通配符或反斜杠`);
+      }
+    }
     if (match === 'ext') {
       value = extensionOf(value);
       if (!value || /[\s/\\*?[\]{}]/.test(value)) {
@@ -96,6 +113,14 @@ function folderPatterns(rule) {
 }
 
 export function patternsForFilterRule(rule) {
+  // 指定文件夹路径：锚定到源根，只排除这个位置；同名文件夹在别的位置不受影响。
+  // 不许再补 **/ 变体，否则锚定就失效了。path 值已在校验里排除了通配符，可直接拼。
+  if (rule.match === 'path') {
+    const anchored = `/${rule.value}`;
+    if (rule.target === 'file') return [anchored];
+    if (rule.target === 'folder') return [`${anchored}/`, `${anchored}/**`];
+    return [`${anchored}/`, `${anchored}/**`, anchored];
+  }
   if (rule.target === 'file') return filePatterns(rule);
   if (rule.target === 'folder') return folderPatterns(rule);
   return dedupe([...filePatterns(rule), ...folderPatterns(rule)]);
