@@ -138,3 +138,41 @@ export function pairFilterRules(rawFilters) {
   if (hasInclude) rules.push('- **');
   return rules;
 }
+
+// 一键排除预设（任务级开关 excludeDbTemp / excludeLogs / excludeTemp，存在任务对象上，
+// 不进 pair.filters）：生成每组 pair 的 FilterRule 时追加到末尾，对每组 src 都生效；
+// 取消勾选即干净去掉，老任务缺字段 = 全关。
+// 1. 数据库临时文件：*-wal / *-shm / *-journal 是后缀式，已覆盖 .db-wal / .sqlite-wal /
+//    .sqlite3-wal 等；另加 *.wal、*.shm（别的软件直接用 .wal 当预写日志扩展名）；绝不含 *.db、*.sqlite、*.sqlite3（主库是真数据，照常备份）。
+// 2. 日志文件：*.log.* 覆盖 .log.1、.log.gz 这类滚动日志。
+// 3. 其他临时、锁和未完成文件：*.bak 排以 .bak 结尾的，*.bak-* 排 .bak-20261112 这类带日期后缀的备份；
+//    不用 *.bak*，它会误伤 foo.bakery 这类名字里含 .bak 的文件；
+//    目录类（__pycache__、**/tmp/、**/temp/、**/.cache/）要同时排除目录本身和里面的内容，
+//    并补 **/ 变体让任意层级都命中（与手填文件夹规则的生成口径一致）。
+export const DB_TEMP_PATTERNS = ['*-wal', '*-shm', '*-journal', '*.journal', '*.db-wal', '*.db-shm', '*.db-journal', '*.wal', '*.shm'];
+export const LOG_PATTERNS = ['*.log', '*.log.*', '*.out', '*.err'];
+export const TEMP_PATTERNS = [
+  '*.tmp', '*.temp', '*.swp', '*.swo', '*~', '.#*', '.#*#',
+  '*.lock', '*.lck', '*.pid', '*.sock',
+  '*.part', '*.partial', '*.crdownload', '*.download', '*.aria2', '*.!qB', '*.!ut', '*.bc', '*.bc!',
+  '.DS_Store', 'Thumbs.db', 'desktop.ini', '.fuse_hidden*', '.~lock.*#', '~$*',
+  '*.pyc', '*.pyo', '*.bak', '*.bak-*', '*.old', '*.orig', '*.backup'
+];
+export const TEMP_DIR_PATTERNS = ['__pycache__', '**/tmp/', '**/temp/', '**/.cache/'];
+function dirPresetRules(base) {
+  const b = String(base).replace(/\/+$/, '');
+  const variants = b.startsWith('**/') ? [b] : [b, `**/${b}`];
+  const out = [];
+  for (const v of variants) out.push(`- ${v}/`, `- ${v}/**`);
+  return out;
+}
+export function presetFilterRules(task) {
+  const rules = [];
+  if (task?.excludeDbTemp) for (const p of DB_TEMP_PATTERNS) rules.push(`- ${p}`);
+  if (task?.excludeLogs) for (const p of LOG_PATTERNS) rules.push(`- ${p}`);
+  if (task?.excludeTemp) {
+    for (const p of TEMP_PATTERNS) rules.push(`- ${p}`);
+    for (const d of TEMP_DIR_PATTERNS) rules.push(...dirPresetRules(d));
+  }
+  return rules;
+}

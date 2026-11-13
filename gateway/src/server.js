@@ -889,6 +889,10 @@ function validateTask(b) {
     maxDelete: options.maxDelete,
     bwlimit: options.bwlimit,
     trackRenames: options.trackRenames,
-    crypt: options.crypt
+    crypt: options.crypt,
+    // 一键排除预设：只认严格 true，老任务/老客户端不传 = 全关，行为不变
+    excludeDbTemp: b.excludeDbTemp === true,
+    excludeLogs: b.excludeLogs === true,
+    excludeTemp: b.excludeTemp === true
   };
 }

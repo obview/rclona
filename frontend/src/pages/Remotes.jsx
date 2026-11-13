@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
-import { BrandBadge, HelpTip, Icon, Modal } from '../components.jsx';
+import { BrandBadge, HelpTip, Icon, Modal, Drawer } from '../components.jsx';
 import { fieldHelp, s3ProviderLabel, typeLabel } from '../fieldhelp.js';
 import { fmtAgo, fmtBytes } from '../util.js';
 
@@ -383,14 +383,14 @@ export default function Remotes({ toast, nav, gotoDetail, openAddSignal, onConsu
       </div>
 
       {adding && (
-        <Modal title="添加网盘" sub="配置项由 rclone 官方定义，密码类字段会被加密保存" wide onClose={() => setAdding(false)}>
+        <Drawer title="添加网盘" sub="配置项由 rclone 官方定义，密码类字段会被加密保存" onClose={() => setAdding(false)}>
           <ProviderForm providers={providers} toast={toast} onDone={() => { setAdding(false); load(); }} />
-        </Modal>
+        </Drawer>
       )}
       {editing && (
-        <Modal title={`编辑网盘「${editing.name}」`} sub="核对或修改配置；密码类字段留空表示不改，保存后会自动重测连接" wide onClose={() => setEditing(null)}>
+        <Drawer title={`编辑网盘「${editing.name}」`} sub="核对或修改配置；密码类字段留空表示不改，保存后会自动重测连接" onClose={() => setEditing(null)}>
           <ProviderForm providers={providers} toast={toast} editing={editing} onDone={() => { setEditing(null); load(); }} />
-        </Modal>
+        </Drawer>
       )}
       {browsing && <FileBrowser remote={browsing} onClose={() => setBrowsing(null)} />}
     </div>

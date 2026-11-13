@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { api } from '../api.js';
-import { FolderPicker, Icon, Modal, HelpTip } from '../components.jsx';
-import { fmtAgo, fmtBytes, fmtTime, scheduleText, WEEKDAYS } from '../util.js';
+import { FolderPicker, Icon, Modal, HelpTip, OptionSection } from '../components.jsx';
+import CronEditor from '../components/CronEditor.jsx';
+import { fmtAgo, fmtBytes, fmtTime, scheduleText } from '../util.js';
 
 const FILTER_ACTIONS = [
   { value: 'exclude', label: '排除' },
@@ -215,14 +216,14 @@ function TaskForm({ remotes, initial, onDone, toast }) {
   const [bwlimit, setBwlimit] = useState(initial?.bwlimit || '');
   const [trackRenames, setTrackRenames] = useState(!!initial?.trackRenames);
   const [cryptOn, setCryptOn] = useState(!!initial?.crypt?.enabled);
+  // 一键排除预设（任务级，对每组映射都生效；老任务缺字段 = 全关）
+  const [excludeDbTemp, setExcludeDbTemp] = useState(!!initial?.excludeDbTemp);
+  const [excludeLogs, setExcludeLogs] = useState(!!initial?.excludeLogs);
+  const [excludeTemp, setExcludeTemp] = useState(!!initial?.excludeTemp);
   // #30：同步方式（mirror 镜像 / copy 单向增加 / bisync 双向）；老任务无此字段 = 镜像
   const [mode, setMode] = useState(initial?.mode || 'mirror');
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState('');
-
-  function toggleWeekday(d) {
-    setWeekdays((prev) => prev.includes(d) ? prev.filter((x) => x !== d) : [...prev, d].sort((a, b) => a - b));
-  }
   function setPairPath(idx, side, path) {
     setPairs((prev) => prev.map((x, i) => (i === idx ? { ...x, [side]: path } : x)));
   }
@@ -301,7 +302,10 @@ function TaskForm({ remotes, initial, onDone, toast }) {
       maxDelete: { count: Math.trunc(Number(mdCount) || 0), percent: Math.trunc(Number(mdPercent) || 0) },
       bwlimit: bwlimit.trim(),
       trackRenames,
-      crypt: { enabled: cryptOn }
+      crypt: { enabled: cryptOn },
+      excludeDbTemp,
+      excludeLogs,
+      excludeTemp
     };
     try {
       if (initial?.id) await api.put(`/tasks/${initial.id}`, body);
@@ -473,9 +477,41 @@ function TaskForm({ remotes, initial, onDone, toast }) {
         </div>
       )}
 
+      {/* 一键排除（任务级，对每组映射都生效；不进逐条规则，取消勾选即干净去掉；老任务默认全不勾） */}
+      <OptionSection icon="filter" color="pink" title="文件筛选"
+        meta={(excludeDbTemp ? 1 : 0) + (excludeLogs ? 1 : 0) + (excludeTemp ? 1 : 0) > 0
+          ? `已排除 ${(excludeDbTemp ? 1 : 0) + (excludeLogs ? 1 : 0) + (excludeTemp ? 1 : 0)} 类`
+          : '未排除临时文件'}>
+        <div className="preset-row">
+          <label className="opt-check">
+            <input type="checkbox" checked={excludeDbTemp} onChange={(e) => setExcludeDbTemp(e.target.checked)} />
+            排除数据库临时文件
+          </label>
+          <div className="preset-hint">排除 *-wal、*-shm、*-journal、*.journal、*.wal、*.shm（.db-wal、.sqlite-wal 这类都在内），不排 .db / .sqlite / .sqlite3 本身（数据库文件照常备份）。</div>
+        </div>
+        <div className="preset-row">
+          <label className="opt-check">
+            <input type="checkbox" checked={excludeLogs} onChange={(e) => setExcludeLogs(e.target.checked)} />
+            排除日志文件
+          </label>
+          <div className="preset-hint">排除 *.log、*.log.*（滚动日志）、*.out、*.err。</div>
+        </div>
+        <div className="preset-row">
+          <label className="opt-check">
+            <input type="checkbox" checked={excludeTemp} onChange={(e) => setExcludeTemp(e.target.checked)} />
+            排除其他临时、锁和未完成文件
+          </label>
+          <div className="preset-hint">排除 *.tmp、*.temp、*.swp、*.swo、*~、.#*、.#*#、*.lock、*.lck、*.pid、*.sock、*.part、*.partial、*.crdownload、*.download、*.aria2、*.!qB、*.!ut、*.bc、*.bc!、.DS_Store、Thumbs.db、desktop.ini、.fuse_hidden*、.~lock.*#、~$*、__pycache__/、*.pyc、*.pyo、**/tmp/、**/temp/、**/.cache/、*.bak、*.bak-*、*.old、*.orig、*.backup。</div>
+          <div className="preset-warn">⚠️ .bak / .old 有时是你特意留的备份，勾之前确认一下。</div>
+        </div>
+        <div style={{ color: 'var(--text-3)', fontSize: 12.5 }}>
+          对每组文件夹映射都生效；每组下面还能再加逐条筛选规则。老任务默认全不勾，行为不变。
+        </div>
+      </OptionSection>
+
       {/* #30：同步方式（基本区，建任务时就要定；三种各自一句大白话 + 风险提示） */}
-      <div className="opt-box" style={{ marginTop: 2, marginBottom: 16 }}>
-        <div className="opt-title">同步方式</div>
+      <OptionSection icon="sync" color="blue" title="同步方式"
+        meta={mode === 'mirror' ? '镜像同步' : mode === 'copy' ? '单向增加' : '双向同步'}>
         <label className="opt-row" style={{ cursor: 'pointer', alignItems: 'flex-start' }}>
           <input type="radio" name="sync-mode" checked={mode === 'mirror'} onChange={() => setMode('mirror')} style={{ marginTop: 3 }} />
           <span>
@@ -504,10 +540,10 @@ function TaskForm({ remotes, initial, onDone, toast }) {
             重要数据请另外再配一个镜像/单向增加任务留底。删除安全阀、旧版本保留、改名识别对双向同步不适用（已自动跳过）。
           </div>
         )}
-      </div>
+      </OptionSection>
 
       {/* #29：备份加密按用户要求放在基本区显眼处（文件夹映射下方、定时上方），不埋在高级区里 */}
-      <div className="opt-box" style={{ marginTop: 2, marginBottom: 16 }}>
+      <OptionSection icon="shield" color="purple" title="备份加密" meta={cryptOn ? '已开启' : '未开启'}>
         <label className="opt-check">
           <input type="checkbox" checked={cryptOn} onChange={(e) => setCryptOn(e.target.checked)} />
           备份加密
@@ -519,75 +555,28 @@ function TaskForm({ remotes, initial, onDone, toast }) {
             密码在「设置」页统一填写（不在这个任务里）；请把它记在你保管重要密码的地方，不要只记在脑子里。
           </div>
         )}
-      </div>
+      </OptionSection>
 
-      <div className="form-grid">
-        <div className="field full">
-          <label>任务名称 <span className="hint">（可选，不填自动生成）</span></label>
-          <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder={srcRemote && dstRemote ? `${srcRemote} → ${dstRemote}` : '例如：R2 备份到 Koofr'} />
-        </div>
-        <div className="field">
-          <label>定时方式</label>
-          <select className="select" value={schedType} onChange={(e) => setSchedType(e.target.value)}>
-            <option value="daily">每天</option>
-            <option value="weekly">每周（可选多天）</option>
-            <option value="monthly">每月</option>
-            <option value="hours">每隔几小时</option>
-            <option value="days">每隔几天</option>
-            <option value="cron">高级：cron 表达式</option>
-          </select>
-        </div>
-        <div className="field">
-          <label>{schedType === 'hours' ? '间隔' : schedType === 'cron' ? 'cron 表达式' : '执行时间'}</label>
-          {schedType === 'weekly' && (
-            <div className="wd-chips" style={{ marginBottom: 8 }}>
-              {WEEKDAYS.map((w, i) => (
-                <button type="button" key={i}
-                  className={`wd-chip${weekdays.includes(i) ? ' on' : ''}`}
-                  onClick={() => toggleWeekday(i)}>{w.replace('周', '')}</button>
-              ))}
-            </div>
-          )}
-          {schedType === 'monthly' && (
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
-              <span style={{ color: 'var(--text-2)', fontSize: 13 }}>每月</span>
-              <input className="input" type="number" min="1" max="31" style={{ width: 84 }}
-                value={dayOfMonth} onChange={(e) => setDayOfMonth(e.target.value)} />
-              <span style={{ color: 'var(--text-2)', fontSize: 13 }}>号（填 31 时，短月份自动按最后一天跑）</span>
-            </div>
-          )}
-          {schedType === 'hours' && (
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <span style={{ color: 'var(--text-2)', fontSize: 13 }}>每隔</span>
-              <input className="input" type="number" min="1" max="720" style={{ width: 84 }}
-                value={intervalHours} onChange={(e) => setIntervalHours(e.target.value)} />
-              <span style={{ color: 'var(--text-2)', fontSize: 13 }}>小时执行一次（从保存时刻起算）</span>
-            </div>
-          )}
-          {schedType === 'days' && (
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 8 }}>
-              <span style={{ color: 'var(--text-2)', fontSize: 13 }}>每隔</span>
-              <input className="input" type="number" min="1" max="365" style={{ width: 84 }}
-                value={intervalDays} onChange={(e) => setIntervalDays(e.target.value)} />
-              <span style={{ color: 'var(--text-2)', fontSize: 13 }}>天，在下面时间执行一次</span>
-            </div>
-          )}
-          {schedType === 'cron' && (
-            <>
-              <input className="input" value={cron} onChange={(e) => setCron(e.target.value)}
-                placeholder="分 时 日 月 周，例如 30 3 * * *" style={{ fontFamily: 'ui-monospace, Menlo, monospace' }} />
-              <div style={{ color: 'var(--text-3)', fontSize: 12.5, marginTop: 6 }}>
-                给熟悉 cron 的用户用的高级写法（五段：分 时 日 月 周），不熟悉就用上面几种方式，别改这个。
-              </div>
-            </>
-          )}
-          {schedType !== 'hours' && schedType !== 'cron' && (
-            <input className="input" type="time" value={time} onChange={(e) => setTime(e.target.value)} />
-          )}
-        </div>
+      <div className="field" style={{ marginBottom: 14 }}>
+        <label>任务名称 <span className="hint">（可选，不填自动生成）</span></label>
+        <input className="input" value={name} onChange={(e) => setName(e.target.value)} placeholder={srcRemote && dstRemote ? `${srcRemote} → ${dstRemote}` : '例如：R2 备份到 Koofr'} />
       </div>
-      <div className="opt-box">
-        <div className="opt-title">数据安全与高级选项 <span className="hint">（都可不设；老任务默认全关、不限）</span></div>
+      <OptionSection icon="history" color="yellow" title="定时执行"
+        meta={scheduleText({ type: schedType, time, weekdays, dayOfMonth, intervalHours, intervalDays, cron })}>
+        <CronEditor
+          value={{ type: schedType, time, weekdays, dayOfMonth, intervalHours, intervalDays, cron }}
+          onChange={(s) => {
+            setSchedType(s.type);
+            if (s.time !== undefined) setTime(s.time);
+            if (s.weekdays !== undefined) setWeekdays(s.weekdays);
+            if (s.dayOfMonth !== undefined) setDayOfMonth(s.dayOfMonth);
+            if (s.intervalHours !== undefined) setIntervalHours(s.intervalHours);
+            if (s.intervalDays !== undefined) setIntervalDays(s.intervalDays);
+            if (s.cron !== undefined) setCron(s.cron);
+          }}
+        />
+      </OptionSection>
+      <OptionSection icon="gear" color="grey" title="数据安全与高级选项" meta="都可不设">
         {mode !== 'bisync' && (
         <div className="opt-row">
           <label className="opt-check">
@@ -644,7 +633,7 @@ function TaskForm({ remotes, initial, onDone, toast }) {
             双向同步只适用「同步限速」：删除安全阀、旧版本保留、改名识别的口径都是单向的，对双向不适用，没有显示（双向自带一道删除过多自动拦下的保护）。
           </div>
         )}
-      </div>
+      </OptionSection>
       <div className="note-box" style={{ marginTop: 16 }}>
         {mode === 'mirror' && (
           <>同步方式为<strong>纯镜像</strong>：目标网盘会与源保持完全一致 —— 源里新增/修改的文件会同步过去，
@@ -762,6 +751,9 @@ export default function Tasks({ toast }) {
                   ? <>{t.mode === 'copy' ? '单向增加' : '双向同步'} · </>
                   : <>镜像 · </>}
                 {scheduleText(t.schedule)}
+                {(t.excludeDbTemp || t.excludeLogs || t.excludeTemp) && (
+                  <> · 已排除{[t.excludeDbTemp && '数据库临时文件', t.excludeLogs && '日志', t.excludeTemp && '其他临时文件'].filter(Boolean).join('、')}</>
+                )}
                 {t.enabled && t.nextRunAt && t.lastStatus !== 'running' && <> · 下次执行 {fmtTime(t.nextRunAt)}</>}
                 {t.enabled && !t.nextRunAt && t.lastStatus !== 'running' && <> · <span style={{ color: '#b97d1e' }}>近期无执行时间，请检查计划设置</span></>}
                 {t.lastStatus === 'success' && <> · 上次成功 {fmtAgo(t.lastRunAt)}</>}

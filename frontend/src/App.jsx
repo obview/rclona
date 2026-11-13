@@ -57,6 +57,13 @@ export default function App() {
   const [detailRemote, setDetailRemote] = useState(''); // #31 当前查看详情的网盘名
   const [addRemoteSignal, setAddRemoteSignal] = useState(0); // #32 侧栏「添加网盘」直达表单的信号（计数器，每点一次 +1）
   const [userMenuOpen, setUserMenuOpen] = useState(false); // #23 侧栏底部头像菜单
+  const [theme, setTheme] = useState(() => document.documentElement.dataset.theme || 'dark');
+  function toggleTheme() {
+    const next = theme === 'dark' ? 'light' : 'dark';
+    document.documentElement.dataset.theme = next;
+    try { localStorage.setItem('rclona-theme', next); } catch { /* 无痕模式等写不进就忽略 */ }
+    setTheme(next);
+  }
   const userMenuRef = useRef(null);
   const runStatusRef = useRef(null); // 运行记录 id -> 上次见到的状态（null=还没初始化）
 
@@ -224,6 +231,10 @@ export default function App() {
           </button>
           <span className="crumb">rclona / {TITLES[page]}</span>
           <div className="spacer" />
+          <button type="button" className="theme-toggle" title={theme === 'dark' ? '切换到浅色' : '切换到深色'}
+            aria-label="切换深浅主题" onClick={toggleTheme}>
+            <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={17} />
+          </button>
         </div>
         <div className="page">
           {page === 'overview' && <Overview nav={nav} gotoRun={gotoRun} />}

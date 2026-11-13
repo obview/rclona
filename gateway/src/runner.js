@@ -4,7 +4,7 @@ import { store, newId, pairsOf } from './store.js';
 import { rc, fsSpec } from './rc.js';
 import { stageReason, classifyError } from './classify.js';
 import { notifyBackupFailure, notifyFirstScheduledSuccess } from './notifier.js';
-import { pairFilterRules, escapeFilterLiteral } from './filters.js';
+import { pairFilterRules, presetFilterRules, escapeFilterLiteral } from './filters.js';
 import { taskOptionsOf, syncModeOf } from './taskopts.js';
 import { ensureCryptRemote, dropCryptRemote } from './crypt.js';
 import { cfg } from './config.js';
@@ -151,8 +151,13 @@ async function computePairFilters({ task, pair, srcFs, log }) {
   } catch (e) {
     log(`空占位对象检测未完成（${e.message}），按原样继续同步`);
   }
-  const filterRules = [...autoFilterRules, ...pairFilterRules(pair.filters)];
+  // 一键排除预设（任务级开关）：追加在用户手填规则之后，对每组都生效；真实同步、校验、
+  // 同步前比对、试运行预览四处共用 computePairFilters，口径一致。
+  const filterRules = [...autoFilterRules, ...pairFilterRules(pair.filters), ...presetFilterRules(task)];
   if (pair.filters?.length) log(`本组已启用 ${pair.filters.length} 条文件筛选规则`);
+  if (task?.excludeDbTemp) log('已排除数据库临时文件：*-wal、*-shm、*-journal、*.journal、*.wal、*.shm（.db / .sqlite 本身不受影响）');
+  if (task?.excludeLogs) log('已排除日志文件：*.log、*.log.*、*.out、*.err');
+  if (task?.excludeTemp) log('已排除其他临时、锁和未完成文件：*.tmp、*.lock、*.part、*.crdownload、.DS_Store 等（含 *.bak、*.bak-日期，注意 .bak 可能是特意留的备份）');
   return { filterRules, skipTopDirs };
 }
 
@@ -233,10 +238,23 @@ async function runPair({ task, pair, pairIdx = 0, log, stages, stats, onProgress
     }
 
     // 阶段 3：连接目标网盘 + 容量预检
+    // 2026-11-13：家宽到 R2 的单次请求时快时慢，连接类错误（超时/断开）重试一次再判失败
+    const listDst = async () => {
+      try { await rc.list(effDstFs, ''); }
+      catch (e) {
+        if (/无法连接 rclone 服务|timeout|aborted|fetch failed/i.test(e.message)) {
+          log('连接目标网盘超时，重试一次');
+          await new Promise((r) => setTimeout(r, 5000));
+          await rc.list(effDstFs, '');
+          return;
+        }
+        throw e;
+      }
+    };
     t0 = Date.now();
     setStage(2, 'running');
     try {
-      await rc.list(effDstFs, '');
+      await listDst();
     } catch (e) {
       if (classifyError(e.message).kind !== 'notfound') return failAt(2, e.message);
       // 目标目录还不存在：这不是故障——rclone sync 本来就会自动建目录，
@@ -399,7 +417,9 @@ async function runPair({ task, pair, pairIdx = 0, log, stages, stats, onProgress
     // 阶段 5：校验（rclone check 复核两边一致性）
     // #30：双向同步由 bisync 在收尾时自行核对两边最终清单（checkSync 默认开），
     // 单向 check 的口径（谁多谁少）对双向不成立，这里直接采信其结果；
-    // 单向增加则只核对「源的文件是否都到了、内容对不对」——目标多出的文件是预期保留，不算不一致。
+    // 单向只核对「源的文件是否都到了」——目标多出的文件是预期保留，不算不一致；
+    // 内容对不上（differ）不判失败：那是文件在传输后又被改动，下次备份时会再同步
+    // （2026-11-13 NAS→R2 首跑：20 个活文件因此误报失败）。
     t0 = Date.now();
     setStage(4, 'running');
     if (mode === 'bisync') {
@@ -407,15 +427,27 @@ async function runPair({ task, pair, pairIdx = 0, log, stages, stats, onProgress
       log('校验通过：双向同步已由 rclone 自行核对，两边清单一致');
       return { ok: true, changes: pairChanges };
     }
+    // 2026-11-13 NAS→R2 首跑教训：校验只判「文件有没有到」，不判「传完又被改」。
+    // 正在跑的服务（数据库、日志、rclona 自己写的日记）在传输的几十分钟里还会改文件，
+    // 传完再比必然对不上；rclone 传每个文件时已经按哈希验过，漏传才算真失败。
+    // 其余备份软件也是这个口径：restic、rsync 遇到中途变化只警告、不判失败。
+    let verifyWarnings = [];
     try {
       const chk = await rc.check(srcFs, effDstFs, filterRules);
-      const diffs = mode === 'copy'
-        ? [...(chk.differ || []), ...(chk.missingOnDst || [])]
-        : [...(chk.differ || []), ...(chk.missingOnSrc || []), ...(chk.missingOnDst || [])];
       const errs = chk.error || [];
       if (errs.length) return failAt(4, errs[0]);
-      if (diffs.length) {
-        return failAt(4, `校验发现 ${diffs.length} 处不一致：${diffs.slice(0, 10).join('、')}`);
+      const missingOnDst = chk.missingOnDst || [];
+      const differ = chk.differ || [];
+      const missingOnSrc = chk.missingOnSrc || [];
+      if (missingOnDst.length) {
+        return failAt(4, `校验发现 ${missingOnDst.length} 个文件没有传到目标：${missingOnDst.slice(0, 10).join('、')}`);
+      }
+      if (differ.length || missingOnSrc.length) {
+        verifyWarnings = [
+          ...differ.map((f) => `传输后被改动：${f}`),
+          ...missingOnSrc.map((f) => `传输中从源消失：${f}`)
+        ];
+        log(`校验提醒：${differ.length} 个文件在传输后被改动、${missingOnSrc.length} 个文件在传输中从源消失，下次备份时会再同步`);
       }
     } catch (e) {
       // check 本身调用失败（与“发现不一致”区分）：归类后报告
@@ -424,8 +456,8 @@ async function runPair({ task, pair, pairIdx = 0, log, stages, stats, onProgress
       else return failAt(4, e.message);
     }
     setStage(4, 'ok', Date.now() - t0);
-    log('校验通过：两边文件一致');
-    return { ok: true, changes: pairChanges };
+    log(verifyWarnings.length ? `校验通过：文件都已到达，${verifyWarnings.length} 处传输中变化仅作提醒（见下方日志）` : '校验通过：两边文件一致');
+    return { ok: true, changes: pairChanges, warnings: verifyWarnings };
   } catch (e) {
     // 兜底：阶段外异常按当前运行中阶段归因
     const idx = stages.findIndex((s) => s.status === 'running');
@@ -482,6 +514,7 @@ export async function runTask(task, trigger = 'manual') {
     stages: STAGES.map((s) => ({ key: s.key, label: s.label, status: 'pending', durationMs: null })),
     stats: {},
     pairs: [],
+    warnings: [],
     logExcerpt: '',
     handledAt: null
   };
@@ -537,7 +570,8 @@ export async function runTask(task, trigger = 'manual') {
       failedStageLabel: r.ok ? '' : STAGES[r.stageIdx].label,
       reasonZh: r.ok ? '' : r.reasonZh,
       stats: { ...pairStats[i] },
-      changes: r.changes || null
+      changes: r.changes || null,
+      warnings: r.warnings || []
     });
     if (!r.ok) {
       failures.push({ idx: i, srcFs, dstFs, ...r });
@@ -546,6 +580,7 @@ export async function runTask(task, trigger = 'manual') {
     persistProgress();
   }
   run.pairs = pairResults;
+  run.warnings = pairResults.flatMap((p) => p.warnings || []);
 
   // #27：运行级变更明细 = 各组明细的聚合（每类仍封顶 500 条，计数是全量）
   const withChanges = pairResults.filter((p) => p.changes);

@@ -25,7 +25,12 @@ const PATHS = {
   up: 'M12 19V5m-6 6 6-6 6 6',
   logout: 'M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4m3 14 5-5-5-5m5 5H9',
   user: 'M12 12a4 4 0 1 0 0-8 4 4 0 0 0 0 8zM4.5 20.5c.9-3.4 3.8-5.2 7.5-5.2s6.6 1.8 7.5 5.2',
-  edit: 'M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4zM14.5 5.5l3 3'
+  edit: 'M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4zM14.5 5.5l3 3',
+  moon: 'M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z',
+  sun: 'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4',
+  filter: 'M4 5h16l-6 7.5V20l-4-2v-5.5z',
+  chev: 'M6 9l6 6 6-6',
+  shield: 'M12 3l7 3v5c0 4.5-3 8.5-7 10-4-1.5-7-5.5-7-10V6zM9 12l2 2 4-4'
 };
 export function Icon({ name, size = 18, sw = 1.8 }) {
   return (
@@ -150,6 +155,47 @@ export function Modal({ title, sub, wide, onClose, children, foot }) {
         <div className="modal-body">{children}</div>
         {foot && <div className="modal-foot">{foot}</div>}
       </div>
+    </div>
+  );
+}
+
+// ---------- 右侧抽屉（Rclone UI 配置抽屉风：遮罩 + 右侧滑入，Esc/点遮罩关闭） ----------
+export function Drawer({ title, sub, onClose, children, foot }) {
+  useEffect(() => {
+    const fn = (e) => { if (e.key === 'Escape') onClose?.(); };
+    window.addEventListener('keydown', fn);
+    return () => window.removeEventListener('keydown', fn);
+  }, [onClose]);
+  return (
+    <div className="drawer-mask" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose?.(); }}>
+      <div className="drawer">
+        <div className="drawer-head">
+          <div>
+            <div className="m-title">{title}</div>
+            {sub && <div className="m-sub">{sub}</div>}
+          </div>
+          <button className="x-btn" onClick={onClose} aria-label="关闭">×</button>
+        </div>
+        <div className="drawer-body">{children}</div>
+        {foot && <div className="drawer-foot">{foot}</div>}
+      </div>
+    </div>
+  );
+}
+
+// ---------- 分组参数区（Rclone UI OptionsSection 风：彩色图标 + 标题 + 已设数量 + 折叠） ----------
+export function OptionSection({ icon = 'gear', color = 'blue', title, meta, defaultOpen = true, children }) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className={`opt-section${open ? ' open' : ''}`}>
+      <button type="button" className="opt-section-head" aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}>
+        <span className={`opt-section-ico ${color}`}><Icon name={icon} size={17} /></span>
+        <span className="opt-section-title">{title}</span>
+        {meta && <span className="opt-section-meta">{meta}</span>}
+        <span className="opt-section-chev"><Icon name="chev" size={16} /></span>
+      </button>
+      {open && <div className="opt-section-body">{children}</div>}
     </div>
   );
 }

@@ -4,6 +4,8 @@ import path from 'node:path';
 import { cfg } from './config.js';
 
 // rclone 以 rcd 模式常驻：全局带 --checksum（纯镜像 + 校验和是本产品的固定策略）
+// 2026-11-13 再加 --local-no-check-updated：本地文件在上传中途被改动时不再让整个同步失败
+// （正在跑的数据库、日志就是这种文件；改了就按读到的内容传，下次备份再同步新版，校验只作提醒）
 let child = null;
 const BASE = () => `http://${cfg.rcAddr}`;
 
@@ -47,6 +49,7 @@ export async function startRcd() {
     '--rc-no-auth',
     `--config=${confPath}`,
     '--checksum',
+    '--local-no-check-updated',
     `--log-file=${logPath}`,
     '--log-level=NOTICE'
   ], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -78,7 +81,8 @@ export const rc = {
   deleteRemote: (name) => call('config/delete', { name }),
   providers: () => call('config/providers'),
   // 列一层目录（真实读取，可用于连通性测试）
-  list: (fs, remote = '') => call('operations/list', { fs, remote }, 45000),
+  // 2026-11-13：家宽到 R2 的单次列表请求时快时慢（9 秒到 2 分钟不等），45 秒不够用，放宽到 180 秒
+  list: (fs, remote = '') => call('operations/list', { fs, remote }, 180000),
   // 递归列出全部条目（#18 占位对象检测用；opt.recurse 是 operations/list 的选项，v1.75.2 实测可用）
   listAll: (fs) => call('operations/list', { fs, remote: '', opt: { recurse: true } }, 120000),
   // 创建目录（连同上级目录一并创建），备份执行时用来自动补建不存在的目标目录
